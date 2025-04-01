@@ -34,10 +34,22 @@ func captureStack(skip int) []uintptr {
 	if currentConfig.disableStack {
 		return nil
 	}
-	stack := stackPool.Get().([]uintptr)
-	pcs := make([]uintptr, currentConfig.stackDepth)
-	n := runtime.Callers(skip+2, pcs)
-	stack = append(stack[:0], pcs[:min(n, currentConfig.stackDepth)]...)
+
+	// Reuse stack buffer
+	buf := stackPool.Get().([]uintptr)
+	buf = buf[:cap(buf)]
+
+	n := runtime.Callers(skip+3, buf) // +3 skips more runtime frames
+	if n == 0 {
+		stackPool.Put(buf)
+		return nil
+	}
+
+	// Return exact-sized copy
+	stack := make([]uintptr, n)
+	copy(stack, buf[:n])
+	stackPool.Put(buf)
+
 	return stack
 }
 

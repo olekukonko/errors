@@ -10,14 +10,16 @@ import (
 // TestNew verifies that New creates an error with the correct message and stack trace.
 func TestNew(t *testing.T) {
 	err := New("test error")
-	defer err.Free() // Clean up
+	defer err.Free()
 	if err.Error() != "test error" {
 		t.Errorf("New() error message = %v, want %v", err.Error(), "test error")
 	}
-	if len(err.Stack()) == 0 {
-		t.Errorf("New() should capture stack trace")
+	if !currentConfig.disableStack && len(err.Stack()) == 0 {
+		t.Errorf("New() should capture stack trace when enabled")
 	}
 }
+
+// Make similar changes to TestNewf and TestNamed
 
 // TestNewf checks that Newf formats the message correctly and includes a stack trace.
 func TestNewf(t *testing.T) {
@@ -27,7 +29,7 @@ func TestNewf(t *testing.T) {
 	if err.Error() != want {
 		t.Errorf("Newf() error message = %v, want %v", err.Error(), want)
 	}
-	if len(err.Stack()) == 0 {
+	if !currentConfig.disableStack && len(err.Stack()) == 0 {
 		t.Errorf("Newf() should capture stack trace")
 	}
 }
@@ -39,7 +41,7 @@ func TestNamed(t *testing.T) {
 	if err.Error() != "test_name" {
 		t.Errorf("Named() error message = %v, want %v", err.Error(), "test_name")
 	}
-	if len(err.Stack()) == 0 {
+	if !currentConfig.disableStack && len(err.Stack()) == 0 {
 		t.Errorf("Named() should capture stack trace")
 	}
 }

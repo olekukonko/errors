@@ -15,11 +15,17 @@ var (
 func init() {
 	errorPool = sync.Pool{
 		New: func() interface{} {
-			e := &Error{pooled: true}
+			e := &Error{
+				pooled:       true,
+				smallContext: [2]contextItem{},
+				stack:        make([]uintptr, 0, currentConfig.stackDepth),
+			}
 			if currentConfig.autofree {
 				runtime.AddCleanup(e, func(_ *struct{}) {
 					if e.pooled && !currentConfig.disablePooling {
 						e.Reset()
+						// Keep the pre-allocated memory
+						e.stack = e.stack[:0]
 						errorPool.Put(e)
 					}
 				}, nil)
@@ -34,6 +40,7 @@ func init() {
 		disableStack:   false,
 		disablePooling: false,
 		filterInternal: true,
+		autofree:       true,
 	}
 	WarmPool(100)
 }

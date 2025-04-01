@@ -23,6 +23,7 @@ func BenchmarkNewNoStack(b *testing.B) {
 		err := New("test error")
 		err.Free()
 	}
+	Configure(Config{DisableStack: false})
 }
 
 // BenchmarkFastNew measures the lightweight FastNew performance.
@@ -133,4 +134,18 @@ func BenchmarkConcurrentErrorCreation(b *testing.B) {
 			err.Free()
 		}
 	})
+}
+
+func BenchmarkSmallContext(b *testing.B) {
+	err := New("base")
+	for i := 0; i < b.N; i++ {
+		_ = err.With("key", i).With("key2", i+1) // Exactly 2 items (array path)
+	}
+}
+
+func BenchmarkMapContext(b *testing.B) {
+	err := New("base")
+	for i := 0; i < b.N; i++ {
+		_ = err.With("key", i).With("key2", i+1).With("key3", i+2) // Map path)
+	}
 }
