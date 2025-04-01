@@ -1,6 +1,3 @@
-// Package errors provides an enhanced error handling system with stack traces,
-// context, monitoring, and retry capabilities. It includes performance optimizations
-// like optional stack traces, object pooling, and small context caching.
 package errors
 
 import (
@@ -15,69 +12,63 @@ import (
 )
 
 const (
-	ctxTimeout  = "[error] timeout"  // Context key for timeout flag
-	ctxRetry    = "[error] retry"    // Context key for retryable flag
-	ctxCategory = "[error] category" // Context key for error category
+	ctxTimeout = "[error] timeout"
+	ctxRetry   = "[error] retry"
 )
 
-// ErrorOpts configures options for error creation.
+type ErrorCategory string
+
 type ErrorOpts struct {
-	SkipStack  int  // Number of stack frames to skip (0 disables stack capture unless forced)
-	UpdateLast bool // Whether to update the last error registry
+	SkipStack int
 }
 
-// Config holds global configuration for the errors package.
 type Config struct {
-	StackDepth      int  // Maximum stack frames to capture
-	ContextSize     int  // Size of small context cache
-	DisableStack    bool // Disables stack traces by default
-	DisableRegistry bool // Disables counting and tracking
-	DisablePooling  bool // Disables object pooling
-	FilterInternal  bool // Filters out internal package frames from stack traces
+	StackDepth     int
+	ContextSize    int
+	DisableStack   bool
+	DisablePooling bool
+	FilterInternal bool
 }
 
 var (
 	configMu sync.RWMutex
 	config   = Config{
-		StackDepth:      32,
-		ContextSize:     2,
-		DisableStack:    false,
-		DisableRegistry: false,
-		DisablePooling:  false,
-		FilterInternal:  true, // Default to filtering internal frames
+		StackDepth:     32,
+		ContextSize:    2,
+		DisableStack:   false,
+		DisablePooling: false,
+		FilterInternal: true,
 	}
 	poolHits   uint64
 	poolMisses uint64
 )
 
-// Configure sets global configuration options for the errors package.
-// It must be called before using the package for settings to take effect.
 func Configure(cfg Config) {
 	configMu.Lock()
 	defer configMu.Unlock()
 	config = cfg
 }
 
-// contextItem represents a key-value pair for small context caching.
 type contextItem struct {
 	key   string
 	value interface{}
 }
 
-// Error represents a rich error object with message, name, context, cause, and stack trace.
 type Error struct {
-	msg          string                 // Formatted message
-	name         string                 // Error identifier
-	template     string                 // Message template
-	context      map[string]interface{} // Additional context (used if >ContextSize items)
-	cause        error                  // Wrapped error
-	stack        []uintptr              // Stack trace (nil if not captured)
-	smallContext []contextItem          // Cache for small context items
-	smallCount   int                    // Number of items in smallContext
-	callback     func()                 // Callback triggered when error is used
+	msg          string
+	name         string
+	template     string
+	context      map[string]interface{}
+	cause        error
+	stack        []uintptr
+	smallContext []contextItem
+	smallCount   int
+	callback     func()
+	code         int
+	category     string
+	count        uint64
 }
 
-// errorPool manages reusable Error instances for performance.
 var errorPool = sync.Pool{
 	New: func() interface{} {
 		configMu.RLock()
@@ -86,7 +77,6 @@ var errorPool = sync.Pool{
 	},
 }
 
-// getPooledError retrieves an error from the pool or creates a new one.
 func getPooledError() *Error {
 	configMu.RLock()
 	defer configMu.RUnlock()
@@ -103,8 +93,6 @@ func getPooledError() *Error {
 	return &Error{smallContext: make([]contextItem, 0, config.ContextSize)}
 }
 
-// WarmPool pre-populates the error pool with a specified number of instances.
-// Useful for reducing allocation overhead at startup.
 func WarmPool(count int) {
 	configMu.RLock()
 	defer configMu.RUnlock()
@@ -116,8 +104,16 @@ func WarmPool(count int) {
 	}
 }
 
-// New creates a basic error with the given message. Stack traces and registry updates
-// are included unless disabled via Configure.
+func Empty() *Error {
+	err := getPooledError()
+	configMu.RLock()
+	defer configMu.RUnlock()
+	if !config.DisableStack {
+		err.stack = captureStack(1)
+	}
+	return err
+}
+
 func New(text string) *Error {
 	err := getPooledError()
 	err.msg = text
@@ -126,21 +122,9 @@ func New(text string) *Error {
 	if !config.DisableStack {
 		err.stack = captureStack(1)
 	}
-	if !config.DisableRegistry {
-		updateLastError(err)
-	}
 	return err
 }
 
-// Make creates a function that returns a new *Error instance with the given message.
-// This ensures fresh error instances while keeping the API clean and configurable.
-func Make(msg string) func() *Error {
-	return func() *Error {
-		return New(msg)
-	}
-}
-
-// Newf creates a formatted error with the given format string and arguments.
 func Newf(format string, args ...interface{}) *Error {
 	err := getPooledError()
 	err.msg = fmt.Sprintf(format, args...)
@@ -149,13 +133,9 @@ func Newf(format string, args ...interface{}) *Error {
 	if !config.DisableStack {
 		err.stack = captureStack(1)
 	}
-	if !config.DisableRegistry {
-		updateLastError(err)
-	}
 	return err
 }
 
-// Named creates an error with a specific identifier but no initial message.
 func Named(name string) *Error {
 	err := getPooledError()
 	err.name = name
@@ -164,27 +144,19 @@ func Named(name string) *Error {
 	if !config.DisableStack {
 		err.stack = captureStack(1)
 	}
-	if !config.DisableRegistry {
-		updateLastError(err)
-	}
 	return err
 }
 
-// Fast creates a lightweight error with no stack trace or registry updates.
-// Ideal for performance-critical paths where minimal overhead is desired.
 func Fast(text string) *Error {
 	err := getPooledError()
 	err.msg = text
 	return err
 }
 
-// Wrapf creates a new error with a formatted message and wraps an existing error.
 func Wrapf(err error, format string, args ...interface{}) *Error {
 	return Newf(format, args...).Wrap(err)
 }
 
-// FromContext creates an error from a context and an existing error, marking it as a timeout
-// if the context deadline was exceeded.
 func FromContext(ctx context.Context, err error) *Error {
 	if err == nil {
 		return nil
@@ -196,7 +168,6 @@ func FromContext(ctx context.Context, err error) *Error {
 	return e
 }
 
-// Error returns the error message, triggering the callback if set.
 func (e *Error) Error() string {
 	if e.callback != nil {
 		e.callback()
@@ -213,12 +184,15 @@ func (e *Error) Error() string {
 	return "unknown error"
 }
 
-// HasError reports whether this error represents a meaningful error condition.
+// Name returns the error name if err is enhanced, empty string otherwise.
+func (e *Error) Name() string {
+	return e.name
+}
+
 func (e *Error) HasError() bool {
 	return e != nil && (e.msg != "" || e.template != "" || e.name != "" || e.cause != nil)
 }
 
-// Is reports whether any error in e's chain matches target, using name comparison for *Error types.
 func (e *Error) Is(target error) bool {
 	if e == nil || target == nil {
 		return e == target
@@ -236,7 +210,6 @@ func (e *Error) Is(target error) bool {
 	return false
 }
 
-// As finds the first error in e's chain that matches target, setting *target to that value.
 func (e *Error) As(target interface{}) bool {
 	if e == nil {
 		return false
@@ -259,12 +232,19 @@ func (e *Error) As(target interface{}) bool {
 	return false
 }
 
-// Unwrap returns the underlying cause of the error, if any.
 func (e *Error) Unwrap() error {
 	return e.cause
 }
 
-// Stack returns a formatted stack trace, capturing it lazily if not present.
+func (e *Error) Count() uint64 {
+	return e.count
+}
+
+func (e *Error) Increment() *Error {
+	atomic.AddUint64(&e.count, 1)
+	return e
+}
+
 func (e *Error) Stack() []string {
 	configMu.RLock()
 	defer configMu.RUnlock()
@@ -292,7 +272,6 @@ func (e *Error) Stack() []string {
 	return trace
 }
 
-// With adds a key-value pair to the error's context, using a small cache up to ContextSize.
 func (e *Error) With(key string, value interface{}) *Error {
 	configMu.RLock()
 	defer configMu.RUnlock()
@@ -311,13 +290,11 @@ func (e *Error) With(key string, value interface{}) *Error {
 	return e
 }
 
-// Wrap sets the cause of the error, creating a chain of errors.
 func (e *Error) Wrap(cause error) *Error {
 	e.cause = cause
 	return e
 }
 
-// WrapNotNil sets the cause only if non-nil, avoiding unnecessary assignments.
 func (e *Error) WrapNotNil(cause error) *Error {
 	if cause != nil {
 		e.cause = cause
@@ -325,13 +302,11 @@ func (e *Error) WrapNotNil(cause error) *Error {
 	return e
 }
 
-// Msgf updates the error message with a formatted string.
 func (e *Error) Msgf(format string, args ...interface{}) *Error {
 	e.msg = fmt.Sprintf(format, args...)
 	return e
 }
 
-// Context returns the error's context map, merging smallContext if needed.
 func (e *Error) Context() map[string]interface{} {
 	if e.smallCount > 0 && e.context == nil {
 		e.context = make(map[string]interface{}, e.smallCount)
@@ -342,7 +317,6 @@ func (e *Error) Context() map[string]interface{} {
 	return e.context
 }
 
-// Trace captures a stack trace if not already present, overriding DisableStack.
 func (e *Error) Trace() *Error {
 	if e.stack == nil {
 		e.stack = captureStack(1)
@@ -350,91 +324,60 @@ func (e *Error) Trace() *Error {
 	return e
 }
 
-// Copy creates a new *Error instance that duplicates the current error’s state.
-// It copies the message, name, template, context, and cause, but resets stack and callback.
-// The new instance can be modified independently without affecting the original.
 func (e *Error) Copy() *Error {
 	newErr := getPooledError()
 	newErr.msg = e.msg
 	newErr.name = e.name
 	newErr.template = e.template
 	newErr.cause = e.cause
-	// Copy context
+	newErr.code = e.code
+	newErr.category = e.category
+	newErr.count = e.count
 	if e.smallCount > 0 || e.context != nil {
 		for k, v := range e.Context() {
 			newErr.With(k, v)
 		}
 	}
-	// Stack and callback are not copied, left fresh for the new instance
 	return newErr
 }
 
-// WithCode associates an HTTP status code with the error, if it has a name.
-func (e *Error) WithCode(code int) *Error {
-	if e.name != "" {
-		codes.mu.Lock()
-		codes.m[e.name] = code
-		codes.mu.Unlock()
-	}
+func (e *Error) WithName(name string) *Error {
+	e.name = name
 	return e
 }
 
-// WithTimeout marks the error as a timeout error.
+func (e *Error) WithTemplate(template string) *Error {
+	e.template = template
+	return e
+}
+
+func (e *Error) WithCode(code int) *Error {
+	e.code = code
+	return e
+}
+
 func (e *Error) WithTimeout() *Error {
 	return e.With(ctxTimeout, true)
 }
 
-// WithRetryable marks the error as retryable.
 func (e *Error) WithRetryable() *Error {
 	return e.With(ctxRetry, true)
 }
 
-// WithCategory adds a category to the error.
 func (e *Error) WithCategory(category ErrorCategory) *Error {
-	return e.With(ctxCategory, string(category))
-}
-
-// WithLocale adds locale-specific messaging.
-func (e *Error) WithLocale(locale string) *Error {
-	if e.name == "" {
-		return e
-	}
-	if localizedMsg, ok := locales[locale+"."+e.name]; ok {
-		e.msg = localizedMsg
-	}
+	e.category = string(category)
 	return e
 }
 
-// Callback sets a function to be called when the error is used.
 func (e *Error) Callback(fn func()) *Error {
 	e.callback = fn
 	return e
 }
 
-// Count returns the number of occurrences of this error type, based on its name.
-func (e *Error) Count() uint64 {
-	configMu.RLock()
-	defer configMu.RUnlock()
-	if config.DisableRegistry {
-		return 0
-	}
-	return registry.counts.Value(e.name)
-}
-
-// Code returns the HTTP status code associated with the error, defaulting to 500 if unnamed.
 func (e *Error) Code() int {
-	if e.name == "" {
-		return 500
-	}
-	codes.mu.RLock()
-	defer codes.mu.RUnlock()
-	if code, ok := codes.m[e.name]; ok {
-		return code
-	}
-	return 500
+	return e.code
 }
 
-// MarshalJSON serializes the error to JSON, including name, message, context, cause, and stack.
 func (e *Error) MarshalJSON() ([]byte, error) {
 	type jsonError struct {
 		Name    string                 `json:"name,omitempty"`
@@ -462,7 +405,6 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 	return json.Marshal(je)
 }
 
-// Reset clears all fields of the error, preparing it for reuse.
 func (e *Error) Reset() {
 	e.msg = ""
 	e.name = ""
@@ -476,9 +418,11 @@ func (e *Error) Reset() {
 	e.smallCount = 0
 	e.smallContext = e.smallContext[:0]
 	e.callback = nil
+	e.code = 0
+	e.category = ""
+	e.count = 0
 }
 
-// Free returns the error to the pool after resetting it.
 func (e *Error) Free() {
 	configMu.RLock()
 	defer configMu.RUnlock()
@@ -488,13 +432,11 @@ func (e *Error) Free() {
 	}
 }
 
-// IsError reports whether the error is of type *Error.
 func IsError(err error) bool {
 	_, ok := err.(*Error)
 	return ok
 }
 
-// Stack returns the stack trace if err is enhanced, nil otherwise.
 func Stack(err error) []string {
 	if e, ok := err.(*Error); ok {
 		return e.Stack()
@@ -502,7 +444,6 @@ func Stack(err error) []string {
 	return nil
 }
 
-// Context returns the context map if err is enhanced, nil otherwise.
 func Context(err error) map[string]interface{} {
 	if e, ok := err.(*Error); ok {
 		return e.Context()
@@ -510,7 +451,13 @@ func Context(err error) map[string]interface{} {
 	return nil
 }
 
-// Code returns the HTTP status code if err is enhanced, defaulting to 500.
+func Count(err error) uint64 {
+	if e, ok := err.(*Error); ok {
+		return e.Count()
+	}
+	return 0
+}
+
 func Code(err error) int {
 	if e, ok := err.(*Error); ok {
 		return e.Code()
@@ -518,7 +465,6 @@ func Code(err error) int {
 	return 500
 }
 
-// Name returns the error name if err is enhanced, empty string otherwise.
 func Name(err error) string {
 	if e, ok := err.(*Error); ok {
 		return e.name
@@ -526,7 +472,6 @@ func Name(err error) string {
 	return ""
 }
 
-// With adds context to an error if it's enhanced, returns unchanged otherwise.
 func With(err error, key string, value interface{}) error {
 	if e, ok := err.(*Error); ok {
 		return e.With(key, value)
@@ -534,7 +479,6 @@ func With(err error, key string, value interface{}) error {
 	return err
 }
 
-// Wrap wraps an error if the wrapper is enhanced.
 func Wrap(wrapper, cause error) error {
 	if e, ok := wrapper.(*Error); ok {
 		return e.Wrap(cause)
@@ -542,7 +486,6 @@ func Wrap(wrapper, cause error) error {
 	return wrapper
 }
 
-// IsTimeout checks if the error is a timeout.
 func IsTimeout(err error) bool {
 	if e, ok := err.(*Error); ok {
 		if val, ok := e.Context()[ctxTimeout].(bool); ok {
@@ -552,7 +495,6 @@ func IsTimeout(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "timeout")
 }
 
-// IsRetryable checks if the error is retryable based on context or common patterns.
 func IsRetryable(err error) bool {
 	if e, ok := err.(*Error); ok {
 		if val, ok := e.Context()[ctxRetry].(bool); ok {
@@ -562,17 +504,13 @@ func IsRetryable(err error) bool {
 	return IsTimeout(err) || strings.Contains(strings.ToLower(err.Error()), "retry")
 }
 
-// GetCategory returns the error category if set.
 func GetCategory(err error) string {
 	if e, ok := err.(*Error); ok {
-		if cat, ok := e.Context()[ctxCategory].(string); ok {
-			return cat
-		}
+		return e.category
 	}
 	return ""
 }
 
-// Is provides compatibility with errors.Is.
 func Is(err, target error) bool {
 	if e, ok := err.(*Error); ok {
 		return e.Is(target)
@@ -580,35 +518,9 @@ func Is(err, target error) bool {
 	return errors.Is(err, target)
 }
 
-// As provides compatibility with errors.As.
 func As(err error, target interface{}) bool {
 	if e, ok := err.(*Error); ok {
 		return e.As(target)
 	}
 	return errors.As(err, target)
 }
-
-//
-//// RetryOptions configures retry behavior.
-//type RetryOptions struct {
-//	MaxAttempts  int
-//	InitialDelay time.Duration
-//	MaxDelay     time.Duration
-//	RetryIf      func(error) bool
-//	OnRetry      func(attempt int, err error)
-//	Exponential  bool
-//	Jitter       bool
-//	Context      context.Context // Optional context for cancellation
-//}
-//
-//// DefaultRetryOptions provides sensible defaults for retry behavior.
-//var DefaultRetryOptions = RetryOptions{
-//	MaxAttempts:  3,
-//	InitialDelay: 100 * time.Millisecond,
-//	MaxDelay:     10 * time.Second,
-//	Exponential:  true,
-//	Jitter:       true,
-//	RetryIf: func(err error) bool {
-//		return IsRetryable(err) || Name(err) == "ErrDBTimeout" || Name(err) == "ErrNetworkTimeout"
-//	},
-//}

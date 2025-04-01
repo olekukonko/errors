@@ -91,38 +91,3 @@ func (m *MultiError) Single() error {
 		return m
 	}
 }
-
-// Monitor represents an error monitoring channel for a specific error name.
-type Monitor struct {
-	name string
-	ch   chan *Error
-}
-
-// NewMonitor creates a new Monitor for the given error name.
-// The returned Monitor receives errors when their count exceeds the threshold.
-func NewMonitor(name string) *Monitor {
-	registry.mu.Lock()
-	defer registry.mu.Unlock()
-	if ch, ok := registry.alerts.Load(name); ok {
-		return &Monitor{name: name, ch: ch.(chan *Error)}
-	}
-	ch := make(chan *Error, 10)
-	registry.alerts.Store(name, ch)
-	return &Monitor{name: name, ch: ch}
-}
-
-// Chan returns the channel for receiving error alerts.
-func (m *Monitor) Chan() <-chan *Error {
-	return m.ch
-}
-
-// Close shuts down the monitor channel.
-func (m *Monitor) Close() {
-	registry.mu.Lock()
-	defer registry.mu.Unlock()
-	if ch, ok := registry.alerts.LoadAndDelete(m.name); ok {
-		if chanPtr, ok := ch.(chan *Error); ok && chanPtr != nil {
-			close(chanPtr)
-		}
-	}
-}

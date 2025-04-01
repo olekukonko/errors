@@ -82,25 +82,14 @@ func BenchmarkErrorWrapping(b *testing.B) {
 	baseErr.Free()
 }
 
-// BenchmarkTemplateError measures templated error performance.
-func BenchmarkTemplateError(b *testing.B) {
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		err := ErrDBConnection("connection failed")
-		err.Free()
-	}
-}
-
 // BenchmarkErrorStackCapture measures lazy stack capture performance.
 func BenchmarkErrorStackCapture(b *testing.B) {
-	Configure(Config{DisableRegistry: true}) // Replace DisableRegistry = true
 	err := New("test")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = err.Stack()
 	}
 	err.Free()
-	Configure(Config{DisableRegistry: false})
 }
 
 // BenchmarkIs measures Is performance.
@@ -127,27 +116,6 @@ func BenchmarkAs(b *testing.B) {
 	if target != nil {
 		target.Free()
 	}
-}
-
-// BenchmarkCount measures Count performance with registry enabled.
-func BenchmarkCount(b *testing.B) {
-	err := Named("test_count")
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = err.Count()
-	}
-	err.Free()
-}
-
-// BenchmarkCountNoRegistry measures Count with registry disabled.
-func BenchmarkCountNoRegistry(b *testing.B) {
-	Configure(Config{DisableRegistry: true}) // Replace DisableRegistry = true
-	err := Named("test_count")
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = err.Count()
-	}
-	err.Free()
 }
 
 func BenchmarkJSONMarshal(b *testing.B) {

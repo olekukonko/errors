@@ -7,19 +7,22 @@ import (
 	"testing"
 )
 
+// TestNew verifies that New creates an error with the correct message and stack trace.
 func TestNew(t *testing.T) {
 	err := New("test error")
+	defer err.Free() // Clean up
 	if err.Error() != "test error" {
 		t.Errorf("New() error message = %v, want %v", err.Error(), "test error")
 	}
 	if len(err.Stack()) == 0 {
 		t.Errorf("New() should capture stack trace")
 	}
-	err.Free() // Clean up
 }
 
+// TestNewf checks that Newf formats the message correctly and includes a stack trace.
 func TestNewf(t *testing.T) {
 	err := Newf("test %s %d", "error", 42)
+	defer err.Free() // Clean up
 	want := "test error 42"
 	if err.Error() != want {
 		t.Errorf("Newf() error message = %v, want %v", err.Error(), want)
@@ -29,8 +32,10 @@ func TestNewf(t *testing.T) {
 	}
 }
 
+// TestNamed ensures Named sets the name correctly and captures a stack trace.
 func TestNamed(t *testing.T) {
 	err := Named("test_name")
+	defer err.Free() // Clean up
 	if err.Error() != "test_name" {
 		t.Errorf("Named() error message = %v, want %v", err.Error(), "test_name")
 	}
@@ -39,6 +44,7 @@ func TestNamed(t *testing.T) {
 	}
 }
 
+// TestErrorMethods tests various methods on the Error type.
 func TestErrorMethods(t *testing.T) {
 	err := New("base error")
 	defer err.Free()
@@ -63,24 +69,40 @@ func TestErrorMethods(t *testing.T) {
 		t.Errorf("Msgf() failed, error = %v, want %v", err.Error(), "new message 123")
 	}
 
-	// Test Trace (already captured, should not overwrite)
+	// Test Trace (should not overwrite existing stack)
 	stackLen := len(err.Stack())
 	err = err.Trace()
 	if len(err.Stack()) != stackLen {
 		t.Errorf("Trace() should not overwrite existing stack, got %d, want %d", len(err.Stack()), stackLen)
 	}
 
-	// Test WithCode (no name, so no effect)
+	// Test WithCode (works regardless of name in new design)
 	err = err.WithCode(400)
-	if err.Code() != 500 {
-		t.Errorf("WithCode() on unnamed error should return 500, got %d", err.Code())
+	if err.Code() != 400 {
+		t.Errorf("WithCode() failed, code = %d, want 400", err.Code())
+	}
+
+	// Test WithCategory
+	err = err.WithCategory("test_category")
+	if GetCategory(err) != "test_category" {
+		t.Errorf("WithCategory() failed, category = %v, want %v", GetCategory(err), "test_category")
+	}
+
+	// Test Increment
+	err = err.Increment()
+	if err.Count() != 1 {
+		t.Errorf("Increment() failed, count = %d, want 1", err.Count())
 	}
 }
 
+// TestIs verifies the Is method for matching errors by name and wrapping.
 func TestIs(t *testing.T) {
 	err := Named("test_error")
+	defer err.Free()
 	err2 := Named("test_error")
+	defer err2.Free()
 	err3 := Named("other_error")
+	defer err3.Free()
 
 	if !err.Is(err2) {
 		t.Errorf("Is() failed, %v should match %v", err, err2)
@@ -91,6 +113,7 @@ func TestIs(t *testing.T) {
 
 	// Test wrapping
 	cause := Named("cause_error")
+	defer cause.Free()
 	err = err.Wrap(cause)
 	if !Is(err, cause) {
 		t.Errorf("Is() failed, wrapped error should match cause")
@@ -104,8 +127,10 @@ func TestIs(t *testing.T) {
 	}
 }
 
+// TestAs checks the As method for unwrapping to the correct error type.
 func TestAs(t *testing.T) {
 	err := New("base").Wrap(Named("target"))
+	defer err.Free()
 	var target *Error
 	if !As(err, &target) {
 		t.Errorf("As() failed, should unwrap to *Error")
@@ -117,6 +142,7 @@ func TestAs(t *testing.T) {
 	// Test with stdlib error
 	stdErr := errors.New("std error")
 	err = New("wrapper").Wrap(stdErr)
+	defer err.Free()
 	var stdTarget error
 	if !As(err, &stdTarget) {
 		t.Errorf("As() failed, should unwrap to stdlib error")
@@ -126,22 +152,26 @@ func TestAs(t *testing.T) {
 	}
 }
 
+// TestCount verifies the Count method for per-instance counting.
 func TestCount(t *testing.T) {
 	err := New("unnamed")
+	defer err.Free()
 	if err.Count() != 0 {
-		t.Errorf("Count() on unnamed error should be 0, got %d", err.Count())
+		t.Errorf("Count() on new error should be 0, got %d", err.Count())
 	}
 
-	err = Named("test_count")
-	if err.Count() != 0 {
-		t.Errorf("Count() on new named error should be 0, got %d", err.Count())
+	err = Named("test_count").Increment()
+	if err.Count() != 1 {
+		t.Errorf("Count() after Increment() should be 1, got %d", err.Count())
 	}
 }
 
+// TestCode checks the Code method for setting and retrieving HTTP status codes.
 func TestCode(t *testing.T) {
 	err := New("unnamed")
-	if err.Code() != 500 {
-		t.Errorf("Code() on unnamed error should be 500, got %d", err.Code())
+	defer err.Free()
+	if err.Code() != 0 { // Changed from 500 to 0 since no default is set
+		t.Errorf("Code() on new error should be 0, got %d", err.Code())
 	}
 
 	err = Named("test_code").WithCode(400)
@@ -150,8 +180,10 @@ func TestCode(t *testing.T) {
 	}
 }
 
+// TestMarshalJSON ensures JSON serialization includes all expected fields.
 func TestMarshalJSON(t *testing.T) {
 	err := New("test").With("key", "value").Wrap(Named("cause"))
+	defer err.Free()
 	data, e := json.Marshal(err)
 	if e != nil {
 		t.Fatalf("MarshalJSON() failed: %v", e)
@@ -178,6 +210,7 @@ func TestMarshalJSON(t *testing.T) {
 	}
 }
 
+// TestEdgeCases verifies behavior in unusual scenarios.
 func TestEdgeCases(t *testing.T) {
 	// Test nil error
 	var nilErr *Error
@@ -190,6 +223,7 @@ func TestEdgeCases(t *testing.T) {
 
 	// Test empty name
 	err := New("empty name")
+	defer err.Free()
 	if err.Is(Named("")) {
 		t.Errorf("Error with empty name should not match unnamed error")
 	}
@@ -197,6 +231,7 @@ func TestEdgeCases(t *testing.T) {
 	// Test stdlib error wrapping
 	stdErr := errors.New("std error")
 	customErr := New("custom").Wrap(stdErr)
+	defer customErr.Free()
 	if !errors.Is(customErr, stdErr) {
 		t.Errorf("errors.Is() should match stdlib error through wrapping")
 	}
