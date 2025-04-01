@@ -10,44 +10,44 @@ import (
 	"sync"
 )
 
-// stackPool manages reusable stack slices for performance.
+// Stack pool and capture functions for managing stack traces.
 var stackPool = sync.Pool{
 	New: func() interface{} {
-		configMu.RLock()
-		defer configMu.RUnlock()
-		return make([]uintptr, 0, config.StackDepth)
+		return make([]uintptr, 0, currentConfig.stackDepth)
 	},
 }
 
 // WarmStackPool pre-populates the stack pool with a specified number of slices.
-// Useful for reducing allocation overhead at startup.
+// Reduces allocation overhead for stack traces; no effect if pooling is disabled.
 func WarmStackPool(count int) {
-	configMu.RLock()
-	defer configMu.RUnlock()
-	if config.DisablePooling {
+	if currentConfig.disablePooling {
 		return
 	}
 	for i := 0; i < count; i++ {
-		stackPool.Put(make([]uintptr, 0, config.StackDepth))
+		stackPool.Put(make([]uintptr, 0, currentConfig.stackDepth))
 	}
 }
 
-// captureStack captures the call stack with configurable depth and filtering.
-// The skip parameter indicates how many frames to skip (e.g., 1 skips the caller of this function).
+// captureStack captures a stack trace with the configured depth.
+// Returns nil if stack tracing is disabled; skip determines the starting frame.
 func captureStack(skip int) []uintptr {
-	configMu.RLock()
-	defer configMu.RUnlock()
-	if config.DisableStack {
+	if currentConfig.disableStack {
 		return nil
 	}
 	stack := stackPool.Get().([]uintptr)
-	var pcs [128]uintptr // Larger buffer to avoid truncation, trimmed later
-	n := runtime.Callers(skip+2, pcs[:])
-	if n > config.StackDepth {
-		n = config.StackDepth
-	}
-	stack = append(stack[:0], pcs[:n]...)
+	pcs := make([]uintptr, currentConfig.stackDepth)
+	n := runtime.Callers(skip+2, pcs)
+	stack = append(stack[:0], pcs[:min(n, currentConfig.stackDepth)]...)
 	return stack
+}
+
+// min returns the smaller of two integers.
+// Helper function for limiting stack trace size.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // getFuncName extracts the function name from an interface, typically a function or method.
@@ -99,7 +99,7 @@ func FormatError(err error) string {
 func Caller(skip int) (file string, line int, function string) {
 	configMu.RLock()
 	defer configMu.RUnlock()
-	if config.DisableStack {
+	if currentConfig.disableStack {
 		return "", 0, "stack tracing disabled"
 	}
 	var pcs [1]uintptr
