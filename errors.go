@@ -95,28 +95,6 @@ type Error struct {
 	count        uint64
 }
 
-var errorPool = sync.Pool{
-	New: func() interface{} {
-		return &Error{}
-	},
-}
-
-// getPooledError retrieves an error instance from the pool or creates a new one.
-// It resets pooled instances before returning them. If pooling is disabled, it always creates a new instance.
-func getPooledError() *Error {
-	if currentConfig.disablePooling {
-		return &Error{}
-	}
-	if err := errorPool.Get(); err != nil {
-		atomic.AddUint64(&poolHits, 1)
-		e := err.(*Error)
-		e.Reset()
-		return e
-	}
-	atomic.AddUint64(&poolMisses, 1)
-	return &Error{}
-}
-
 // WarmPool pre-populates the error pool with a specified number of instances.
 // This reduces allocation overhead during initial usage. Has no effect if pooling is disabled.
 func WarmPool(count int) {
@@ -522,8 +500,8 @@ func (e *Error) Reset() {
 // Free resets the error and returns it to the pool, if pooling is enabled.
 // Does nothing beyond reset if pooling is disabled.
 func (e *Error) Free() {
-	e.Reset()
 	if !currentConfig.disablePooling {
+		e.Reset()
 		errorPool.Put(e)
 	}
 }
