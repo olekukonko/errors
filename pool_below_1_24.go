@@ -35,8 +35,8 @@ func init() {
 	}
 
 	currentConfig = cachedConfig{
-		stackDepth:     32,
-		contextSize:    2,
+		stackDepth:     stackDepth,
+		contextSize:    contextSize,
 		disableStack:   false,
 		disablePooling: true,
 		filterInternal: true,

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/olekukonko/errors"
@@ -14,7 +15,7 @@ import (
 
 // Config holds configuration for the errmgr package.
 type Config struct {
-	DisableErrMgr bool // Disables counting and tracking if true
+	DisableMetrics bool // Disables counting and tracking if true
 }
 
 // cachedConfig holds the current configuration, updated only on Configure().
@@ -58,7 +59,7 @@ type shardedCounter struct {
 // It is thread-safe and applies immediately to all operations.
 func Configure(cfg Config) {
 	configMu.Lock()
-	currentConfig = cachedConfig{disableErrMgr: cfg.DisableErrMgr}
+	currentConfig = cachedConfig{disableErrMgr: cfg.DisableMetrics}
 	configMu.Unlock()
 }
 
@@ -76,18 +77,22 @@ func (c *shardedCounter) Inc(name string) uint64 {
 	shard := uint64(uintptr(unsafe.Pointer(&shards))) % 8
 	newCount := atomic.AddUint64(&shards[shard].value, 1)
 
-	// Check thresholds and trigger alerts
 	if thresh, ok := registry.thresholds.Load(name); ok {
 		total := c.Value(name)
 		if total >= thresh.(uint64) {
 			if ch, ok := registry.alerts.Load(name); ok {
-				go func() {
-					// Non-blocking send to avoid deadlocks
-					select {
-					case ch.(chan *errors.Error) <- errors.New(fmt.Sprintf("%s count exceeded threshold: %d", name, total)):
-					default:
+				go func(ch chan *errors.Error) {
+					alert := errors.New(fmt.Sprintf("%s count exceeded threshold: %d", name, total)).
+						WithName(name)
+					for i := uint64(0); i < total; i++ {
+						alert.Increment()
 					}
-				}()
+					select {
+					case ch <- alert:
+					case <-time.After(1 * time.Second):
+						return // Drop if channel is closed or full
+					}
+				}(ch.(chan *errors.Error))
 			}
 		}
 	}

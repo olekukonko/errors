@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// BenchmarkNewError measures the default New performance.
-func BenchmarkNewError(b *testing.B) {
+// Basic error creation benchmarks
+func BenchmarkBasic_New(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		err := New("test error")
@@ -15,36 +15,160 @@ func BenchmarkNewError(b *testing.B) {
 	}
 }
 
-// BenchmarkNewNoStack measures New without stack traces.
-func BenchmarkNewNoStack(b *testing.B) {
-	Configure(Config{DisableStack: true}) // Replace DisableStack = true
+func BenchmarkBasic_NewNoFree(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		err := New("test error")
+		_ = New("test error") // Test without Free()
+	}
+}
+
+func BenchmarkBasic_StdlibComparison(b *testing.B) {
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = errors.New("test error") // Stdlib baseline
+	}
+}
+
+// Stack trace related benchmarks
+func BenchmarkStack_WithStack(b *testing.B) {
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		err := New("test").WithStack()
 		err.Free()
 	}
-	Configure(Config{DisableStack: false})
 }
 
-// BenchmarkFastNew measures the lightweight FastNew performance.
-func BenchmarkFastNew(b *testing.B) {
+func BenchmarkStack_Trace(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		err := Fast("test error")
+		err := Trace("test error")
 		err.Free()
 	}
 }
 
-// BenchmarkStdlibNewError measures stdlib errors.New performance.
-func BenchmarkStdlibNewError(b *testing.B) {
+func BenchmarkStack_Capture(b *testing.B) {
+	err := New("test")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = errors.New("test error")
+		_ = err.Stack() // Measure stack trace generation
+	}
+	err.Free()
+}
+
+// Context operation benchmarks
+func BenchmarkContext_Small(b *testing.B) {
+	err := New("base")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = err.With("key", i).With("key2", i+1) // Fits in smallContext array
+	}
+	err.Free()
+}
+
+func BenchmarkContext_Map(b *testing.B) {
+	err := New("base")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Exceeds smallContext capacity
+		_ = err.With("k1", i).With("k2", i+1).With("k3", i+2)
+	}
+	err.Free()
+}
+
+func BenchmarkContext_Reuse(b *testing.B) {
+	err := New("base").With("init", "value")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = err.With("key", i) // Test with existing context
+	}
+	err.Free()
+}
+
+// Error wrapping benchmarks
+func BenchmarkWrapping_Simple(b *testing.B) {
+	base := New("base")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		err := New("wrapper").Wrap(base)
+		err.Free()
+	}
+	base.Free()
+}
+
+func BenchmarkWrapping_Deep(b *testing.B) {
+	var err *Error
+	for i := 0; i < 10; i++ {
+		err = New("level").Wrap(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = err.Unwrap() // Measure unwrapping performance
+	}
+	err.Free()
+}
+
+// Type assertion benchmarks
+func BenchmarkTypeAssertion_Is(b *testing.B) {
+	target := Named("target")
+	err := New("wrapper").Wrap(target)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = Is(err, target)
+	}
+	target.Free()
+}
+
+func BenchmarkTypeAssertion_As(b *testing.B) {
+	err := New("wrapper").Wrap(Named("target"))
+	var target *Error
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = As(err, &target)
+	}
+	if target != nil {
+		target.Free()
 	}
 }
 
-// BenchmarkNamedError measures Named performance.
-func BenchmarkNamedError(b *testing.B) {
+// Serialization benchmarks
+func BenchmarkSerialization_JSON(b *testing.B) {
+	err := New("test").With("key", "value").With("num", 42)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = json.Marshal(err)
+	}
+}
+
+func BenchmarkSerialization_JSONWithStack(b *testing.B) {
+	err := Trace("test").With("key", "value")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = json.Marshal(err)
+	}
+}
+
+// Concurrency benchmarks
+func BenchmarkConcurrency_Creation(b *testing.B) {
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			err := New("parallel error")
+			err.Free()
+		}
+	})
+}
+
+func BenchmarkConcurrency_Context(b *testing.B) {
+	base := New("base")
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_ = base.With("key", "value")
+		}
+	})
+	base.Free()
+}
+
+// Special case benchmarks
+func BenchmarkSpecial_Named(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		err := Named("test_error")
@@ -52,100 +176,10 @@ func BenchmarkNamedError(b *testing.B) {
 	}
 }
 
-// BenchmarkErrorWithContext measures adding context performance with small cache.
-func BenchmarkErrorWithContext(b *testing.B) {
-	err := New("base error")
+func BenchmarkSpecial_Format(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = err.With("key", i) // Should use smallContext
-	}
-	err.Free()
-}
-
-// BenchmarkErrorWithOne measures adding a single context item performance.
-func BenchmarkErrorWithOne(b *testing.B) {
-	err := New("base error")
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = err.With("key", i)
-	}
-	err.Free()
-}
-
-// BenchmarkErrorWrapping measures wrapping performance.
-func BenchmarkErrorWrapping(b *testing.B) {
-	baseErr := New("base error")
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		err := New("wrapper").Wrap(baseErr)
+		err := Errorf("formatted %s %d", "error", i)
 		err.Free()
-	}
-	baseErr.Free()
-}
-
-// BenchmarkErrorStackCapture measures lazy stack capture performance.
-func BenchmarkErrorStackCapture(b *testing.B) {
-	err := New("test")
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = err.Stack()
-	}
-	err.Free()
-}
-
-// BenchmarkIs measures Is performance.
-func BenchmarkIs(b *testing.B) {
-	err := New("wrapper").Wrap(Named("target"))
-	target := Named("target")
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = Is(err, target)
-	}
-	err.Free()
-	target.Free()
-}
-
-// BenchmarkAs measures As performance.
-func BenchmarkAs(b *testing.B) {
-	err := New("wrapper").Wrap(Named("target"))
-	var target *Error
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = As(err, &target)
-	}
-	err.Free()
-	if target != nil {
-		target.Free()
-	}
-}
-
-func BenchmarkJSONMarshal(b *testing.B) {
-	err := New("test").With("key1", "value1").With("key2", 42)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, _ = json.Marshal(err)
-	}
-}
-
-func BenchmarkConcurrentErrorCreation(b *testing.B) {
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			err := New("concurrent error")
-			err.Free()
-		}
-	})
-}
-
-func BenchmarkSmallContext(b *testing.B) {
-	err := New("base")
-	for i := 0; i < b.N; i++ {
-		_ = err.With("key", i).With("key2", i+1) // Exactly 2 items (array path)
-	}
-}
-
-func BenchmarkMapContext(b *testing.B) {
-	err := New("base")
-	for i := 0; i < b.N; i++ {
-		_ = err.With("key", i).With("key2", i+1).With("key3", i+2) // Map path)
 	}
 }

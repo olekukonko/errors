@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 // TestNew verifies that New creates an error with the correct message and stack trace.
@@ -14,8 +15,8 @@ func TestNew(t *testing.T) {
 	if err.Error() != "test error" {
 		t.Errorf("New() error message = %v, want %v", err.Error(), "test error")
 	}
-	if !currentConfig.disableStack && len(err.Stack()) == 0 {
-		t.Errorf("New() should capture stack trace when enabled")
+	if len(err.Stack()) != 0 {
+		t.Errorf("New() should not capture stack trace, got %d frames", len(err.Stack()))
 	}
 }
 
@@ -29,8 +30,8 @@ func TestNewf(t *testing.T) {
 	if err.Error() != want {
 		t.Errorf("Newf() error message = %v, want %v", err.Error(), want)
 	}
-	if !currentConfig.disableStack && len(err.Stack()) == 0 {
-		t.Errorf("Newf() should capture stack trace")
+	if len(err.Stack()) != 0 {
+		t.Errorf("Newf() should not capture stack trace, got %d frames", len(err.Stack()))
 	}
 }
 
@@ -41,7 +42,7 @@ func TestNamed(t *testing.T) {
 	if err.Error() != "test_name" {
 		t.Errorf("Named() error message = %v, want %v", err.Error(), "test_name")
 	}
-	if !currentConfig.disableStack && len(err.Stack()) == 0 {
+	if len(err.Stack()) == 0 {
 		t.Errorf("Named() should capture stack trace")
 	}
 }
@@ -71,14 +72,17 @@ func TestErrorMethods(t *testing.T) {
 		t.Errorf("Msgf() failed, error = %v, want %v", err.Error(), "new message 123")
 	}
 
-	// Test Trace (should not overwrite existing stack)
+	// Test Trace (should capture stack if none exists)
 	stackLen := len(err.Stack())
+	if stackLen != 0 {
+		t.Errorf("Initial stack length should be 0, got %d", stackLen)
+	}
 	err = err.Trace()
-	if len(err.Stack()) != stackLen {
-		t.Errorf("Trace() should not overwrite existing stack, got %d, want %d", len(err.Stack()), stackLen)
+	if len(err.Stack()) == 0 {
+		t.Errorf("Trace() should capture a stack trace, got no frames")
 	}
 
-	// Test WithCode (works regardless of name in new design)
+	// Test WithCode
 	err = err.WithCode(400)
 	if err.Code() != 400 {
 		t.Errorf("WithCode() failed, code = %d, want 400", err.Code())
@@ -234,13 +238,35 @@ func TestEdgeCases(t *testing.T) {
 	stdErr := errors.New("std error")
 	customErr := New("custom").Wrap(stdErr)
 	defer customErr.Free()
-	if !errors.Is(customErr, stdErr) {
-		t.Errorf("errors.Is() should match stdlib error through wrapping")
+	if !Is(customErr, stdErr) {
+		t.Errorf("Is() should match stdlib error through wrapping")
 	}
 
 	// Test As with nil target
 	var nilTarget *Error
 	if As(nilErr, &nilTarget) {
 		t.Errorf("As(nil, &nilTarget) should return false")
+	}
+}
+
+func TestRetryWithCallback(t *testing.T) {
+	attempts := 0
+	retry := NewRetry(
+		WithMaxAttempts(3),
+		WithDelay(1*time.Millisecond),
+		WithOnRetry(func(attempt int, err error) {
+			attempts++
+		}),
+	)
+
+	err := retry.Execute(func() error {
+		return New("retry me").WithRetryable()
+	})
+
+	if attempts != 3 {
+		t.Errorf("Expected 3 retry attempts, got %d", attempts)
+	}
+	if err == nil {
+		t.Error("Expected retry to exhaust with error, got nil")
 	}
 }

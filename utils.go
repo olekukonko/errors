@@ -29,23 +29,20 @@ func WarmStackPool(count int) {
 }
 
 // captureStack captures a stack trace with the configured depth.
-// Returns nil if stack tracing is disabled; skip determines the starting frame.
+// skip=0 means capture current call site
 func captureStack(skip int) []uintptr {
-	if currentConfig.disableStack {
-		return nil
-	}
-
-	// Reuse stack buffer
+	// Get buffer with enough capacity
 	buf := stackPool.Get().([]uintptr)
 	buf = buf[:cap(buf)]
 
-	n := runtime.Callers(skip+3, buf) // +3 skips more runtime frames
+	// +1 skips runtime.Callers itself
+	n := runtime.Callers(skip+2, buf)
 	if n == 0 {
 		stackPool.Put(buf)
 		return nil
 	}
 
-	// Return exact-sized copy
+	// Return exact-sized slice
 	stack := make([]uintptr, n)
 	copy(stack, buf[:n])
 	stackPool.Put(buf)
@@ -111,9 +108,6 @@ func FormatError(err error) string {
 func Caller(skip int) (file string, line int, function string) {
 	configMu.RLock()
 	defer configMu.RUnlock()
-	if currentConfig.disableStack {
-		return "", 0, "stack tracing disabled"
-	}
 	var pcs [1]uintptr
 	n := runtime.Callers(skip+2, pcs[:])
 	if n == 0 {

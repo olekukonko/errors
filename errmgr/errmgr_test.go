@@ -4,17 +4,17 @@ import (
 	"fmt"
 	"github.com/olekukonko/errors"
 	"testing"
+	"time"
 )
 
 func TestMain(m *testing.M) {
 	errors.Configure(errors.Config{
 		StackDepth:     32,
 		ContextSize:    2,
-		DisableStack:   false,
 		DisablePooling: false,
 		FilterInternal: true,
 	})
-	Configure(Config{DisableErrMgr: false})
+	Configure(Config{DisableMetrics: false})
 	errors.WarmPool(10)
 	errors.WarmStackPool(10)
 	m.Run()
@@ -116,5 +116,27 @@ func TestCountReset(t *testing.T) {
 	defer err2.Free()
 	if Metrics()[name] != 1 {
 		t.Errorf("Metrics()[%s] after reset = %d, want 1", name, Metrics()[name])
+	}
+}
+
+func TestMonitorAlerts(t *testing.T) {
+	Reset()
+	monitor := NewMonitor("TestError")
+	SetThreshold("TestError", 2)
+	defer monitor.Close()
+
+	errFunc := Define("TestError", "test error %d")
+	for i := 0; i < 3; i++ {
+		err := errFunc(i)
+		err.Free()
+	}
+
+	select {
+	case alert := <-monitor.Alerts():
+		if alert.Name() != "TestError" || alert.Count() < 2 {
+			t.Errorf("Expected alert for TestError with count >= 2, got %s:%d", alert.Name(), alert.Count())
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("No alert received within timeout")
 	}
 }

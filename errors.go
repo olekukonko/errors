@@ -16,9 +16,10 @@ const (
 	ctxTimeout = "[error] timeout"
 	ctxRetry   = "[error] retry"
 
-	maxSmallItems = 2
-	bufferSize    = 256
-	warmUpSize    = 100
+	contextSize = 2
+	bufferSize  = 256
+	warmUpSize  = 100
+	stackDepth  = 32
 )
 
 type ErrorCategory string
@@ -32,7 +33,6 @@ type ErrorOpts struct {
 type Config struct {
 	StackDepth     int  // Maximum depth of the stack trace.
 	ContextSize    int  // Initial size of the context map (not used with fixed-size array).
-	DisableStack   bool // If true, disables stack trace capture.
 	DisablePooling bool // If true, disables object pooling for errors.
 	FilterInternal bool // If true, filters internal package frames from stack traces.
 	AutoFree       bool
@@ -42,7 +42,6 @@ type Config struct {
 type cachedConfig struct {
 	stackDepth     int
 	contextSize    int
-	disableStack   bool
 	disablePooling bool
 	filterInternal bool
 	autofree       bool // If true, filters internal package frames from stack traces.
@@ -57,9 +56,8 @@ var (
 
 func init() {
 	currentConfig = cachedConfig{
-		stackDepth:     32,
-		contextSize:    maxSmallItems,
-		disableStack:   false,
+		stackDepth:     stackDepth,
+		contextSize:    contextSize,
 		disablePooling: false,
 		filterInternal: true,
 		autofree:       true,
@@ -81,9 +79,7 @@ func Configure(cfg Config) {
 	if cfg.ContextSize != 0 {
 		currentConfig.contextSize = cfg.ContextSize
 	}
-	if currentConfig.disableStack != cfg.DisableStack {
-		currentConfig.disableStack = cfg.DisableStack
-	}
+
 	if currentConfig.disablePooling != cfg.DisablePooling {
 		currentConfig.disablePooling = cfg.DisablePooling
 	}
@@ -104,25 +100,31 @@ type contextItem struct {
 // Error is a custom error type with enhanced features like stack tracing, context, and error chaining.
 // It is optimized for performance by separating fields into hot, warm, and cold paths based on usage frequency.
 type Error struct {
-	// Hot Path (frequently accessed in Error() and Stack() methods)
-	stack []uintptr // Captured stack trace (approx. 24 bytes) used for debugging and tracing.
-	msg   string    // The error message (approx. 16 bytes), primary field for error description.
-	name  string    // Name of the error (approx. 16 bytes), can be used for error classification.
+	// Hot Path (performance critical fields that are frequently accessed)
+	stack []uintptr // Stack trace (24 bytes), used for debugging and tracing.
+	msg   string    // Error message (16 bytes), the primary description of the error.
+	name  string    // Name of the error (16 bytes), useful for error classification and identification.
 
-	// Warm Path (frequently accessed, but not as critical as hot fields)
-	template string // Formatted template for the error message (approx. 16 bytes).
-	category string // Category string for classifying the error (approx. 16 bytes).
-	code     int    // Numeric code (e.g., HTTP status) for the error (approx. 8 bytes).
-	count    uint64 // A counter for tracking occurrences (approx. 8 bytes).
+	// Warm Path (fields that are accessed less frequently but still important for error handling)
+	template string // Formatted template for the error message (16 bytes).
+	category string // Category for classifying the error (16 bytes), helps in categorizing errors.
+	count    uint64 // Occurrence count (8 bytes), tracks how many times the error has occurred.
+	code     int32  // Numeric error code (4 bytes), e.g., HTTP status code or custom error code.
 
-	// Cold Path (rarely accessed fields, used for additional context or chaining)
-	context      map[string]interface{}     // Additional context data (map pointer, approx. 8 bytes).
-	cause        error                      // Wrapped underlying error (approx. 16 bytes).
-	callback     func()                     // Callback function to execute on error retrieval (approx. 8 bytes).
-	smallContext [maxSmallItems]contextItem // Fixed-size array for up to 2 key/value context pairs (size depends on contextItem).
-	smallCount   int                        // Number of items stored in smallContext (approx. 8 bytes).
-	pooled       bool                       // Flag indicating whether the error is pooled for reuse (1 byte).
-	_            [7]byte                    // Padding to align the struct correctly.
+	// ↓ Padding for memory alignment ↓
+	_ [4]byte // Ensures that the next field (context) is 8-byte aligned (critical for performance).
+
+	// Cold Path (less frequently accessed fields, often used for additional context or error chaining)
+	context      map[string]interface{} // Additional context data (8 bytes), typically a pointer to a map.
+	cause        error                  // The underlying cause of the error (16 bytes), supports error chaining.
+	callback     func()                 // Optional callback function (8 bytes), executed on error retrieval.
+	smallContext [2]contextItem         // Fixed-size array (64 bytes), holds key/value pairs for smaller context.
+	smallCount   int32                  // Number of items stored in `smallContext` (4 bytes).
+
+	// ↓ Padding for mutex alignment ↓
+	_ [3]byte // Ensures that the mutex (`sync.RWMutex`) is aligned on an 8-byte boundary.
+
+	mu sync.RWMutex // Mutex (24 bytes), ensures thread-safe access to the error object in concurrent environments.
 }
 
 // WarmPool pre-populates the error pool with a specified number of instances.
@@ -131,12 +133,10 @@ func WarmPool(count int) {
 	if currentConfig.disablePooling {
 		return
 	}
-	// Pre-warm both pools
 	for i := 0; i < count; i++ {
 		errorPool.Put(&Error{
-			pooled:       true,
-			smallContext: [maxSmallItems]contextItem{},
-			stack:        make([]uintptr, 0, currentConfig.stackDepth),
+			smallContext: [contextSize]contextItem{},
+			stack:        nil, // Start with nil instead of empty slice
 		})
 		stackPool.Put(make([]uintptr, currentConfig.stackDepth))
 	}
@@ -146,15 +146,13 @@ func WarmPool(count int) {
 func newError() *Error {
 	if currentConfig.disablePooling {
 		return &Error{
-			pooled:       false,
-			smallContext: [maxSmallItems]contextItem{},
+			smallContext: [contextSize]contextItem{},
+			stack:        nil, // Explicitly set to nil
 		}
 	}
-
 	e := errorPool.Get().(*Error)
-	e.pooled = true
-	// Keep allocated memory but reset state
 	e.Reset()
+	e.stack = nil // Ensure stack is nil after reset
 	return e
 }
 
@@ -162,40 +160,42 @@ func newError() *Error {
 // It is useful as a base for building errors incrementally.
 func Empty() *Error {
 	e := newError()
-	if !currentConfig.disableStack {
-		e.stack = captureStack(1)
-	}
 	return e
 }
 
-// New creates a new error with the specified message and an optional stack trace.
-// The message is stored directly without formatting.
-// Then modify all constructors to use this:
+// New creates a fast, lightweight error without stack tracing.
+// For better performance, use this instead of Trace() when stack traces aren't needed.
 func New(text string) *Error {
-	e := newError()
-	e.msg = text
-	if !currentConfig.disableStack {
-		// Reuse stack capture buffer
-		buf := stackPool.Get().([]uintptr)
-		n := runtime.Callers(2, buf) // Skip runtime.Callers and New
-		if n > 0 {
-			e.stack = make([]uintptr, n)
-			copy(e.stack, buf[:n])
-		}
-		stackPool.Put(buf)
-	}
-	return e
+	err := newError()
+	err.msg = text
+	return err
 }
 
-// Newf creates a new error with a formatted message and an optional stack trace.
-// It uses fmt.Sprintf to format the message with the provided arguments.
+// Newf is an alias to Errorf for fmt.Errorf compatibility
 func Newf(format string, args ...interface{}) *Error {
-	e := newError()
-	e.msg = fmt.Sprintf(format, args...)
-	if !currentConfig.disableStack {
-		e.stack = captureStack(1)
-	}
-	return e
+	err := newError()
+	err.msg = fmt.Sprintf(format, args...)
+	return err
+}
+
+// Errorf creates a formatted error without stack traces
+func Errorf(format string, args ...interface{}) *Error {
+	err := newError()
+	err.msg = fmt.Sprintf(format, args...)
+	return err
+}
+
+// Trace creates an error with stack trace capture enabled.
+// Use when call stacks are needed for debugging, but note this has ~20x performance overhead.
+func Trace(text string) *Error {
+	e := New(text)
+	return e.WithStack()
+}
+
+// Tracef creates a formatted error with stack trace
+func Tracef(format string, args ...interface{}) *Error {
+	e := Errorf(format, args...)
+	return e.WithStack()
 }
 
 // Named creates a new error with a specific name and an optional stack trace.
@@ -203,18 +203,7 @@ func Newf(format string, args ...interface{}) *Error {
 func Named(name string) *Error {
 	e := newError()
 	e.name = name
-	if !currentConfig.disableStack {
-		e.stack = captureStack(1)
-	}
-	return e
-}
-
-// Fast creates a lightweight error with a message, skipping stack trace capture.
-// It is optimized for performance in scenarios where stack traces are unnecessary.
-func Fast(text string) *Error {
-	err := getPooledError()
-	err.msg = text
-	return err
+	return e.WithStack()
 }
 
 // Wrapf creates a new error with a formatted message and wraps an existing error.
@@ -332,23 +321,15 @@ func (e *Error) Increment() *Error {
 // Stack returns a detailed stack trace as a slice of strings.
 // Captures the stack lazily if not already present and stack tracing is enabled.
 func (e *Error) Stack() []string {
-	if e.stack == nil && !currentConfig.disableStack {
-		e.stack = captureStack(1)
-	}
 	if e.stack == nil {
 		return nil
 	}
 	frames := runtime.CallersFrames(e.stack)
 	var trace []string
-	for i := 0; i < currentConfig.stackDepth; i++ {
+	for {
 		frame, more := frames.Next()
-		if currentConfig.filterInternal && strings.Contains(frame.Function, "github.com/olekukonko/errors") {
-			if !more {
-				break
-			}
-			continue
-		}
-		trace = append(trace, fmt.Sprintf("%s\n\t%s:%d", frame.Function, frame.File, frame.Line))
+		trace = append(trace, fmt.Sprintf("%s\n\t%s:%d",
+			frame.Function, frame.File, frame.Line))
 		if !more {
 			break
 		}
@@ -376,28 +357,31 @@ func (e *Error) FastStack() []string {
 	return frames
 }
 
+// Wrap associates a cause error with this error, creating an error chain.
+// Returns the error for method chaining.
+func (e *Error) Wrap(cause error) *Error {
+	e.cause = cause
+	return e
+}
+
 // With adds a key-value pair to the error's context.
 // Stores up to 2 items in a fixed array; additional items use a map.
-// Modify With to avoid map allocation for small contexts
 func (e *Error) With(key string, value interface{}) *Error {
-	// Fast path - use array for first 2 items
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if e.smallCount < 2 {
 		e.smallContext[e.smallCount] = contextItem{key, value}
 		e.smallCount++
 		return e
 	}
-
-	// Medium path - convert to map if exactly at threshold
-	if e.smallCount == maxSmallItems && e.context == nil {
+	if e.smallCount == contextSize && e.context == nil {
 		e.context = make(map[string]interface{}, currentConfig.contextSize)
-		for i := 0; i < e.smallCount; i++ {
+		for i := int32(0); i < e.smallCount; i++ {
 			e.context[e.smallContext[i].key] = e.smallContext[i].value
 		}
-		e.smallCount = 3 // Mark as converted
-		return e
+		e.smallCount = 3
 	}
-
-	// Existing map path
 	if e.context == nil {
 		e.context = make(map[string]interface{}, currentConfig.contextSize)
 	}
@@ -405,10 +389,11 @@ func (e *Error) With(key string, value interface{}) *Error {
 	return e
 }
 
-// Wrap associates a cause error with this error, creating an error chain.
-// Returns the error for method chaining.
-func (e *Error) Wrap(cause error) *Error {
-	e.cause = cause
+// WithStack captures the stack trace at call time and returns the error
+func (e *Error) WithStack() *Error {
+	if e.stack == nil {
+		e.stack = captureStack(1)
+	}
 	return e
 }
 
@@ -431,9 +416,12 @@ func (e *Error) Msgf(format string, args ...interface{}) *Error {
 // Context returns the error's context as a map.
 // Converts smallContext to a map if needed; returns nil if empty.
 func (e *Error) Context() map[string]interface{} {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
 	if e.smallCount > 0 && e.context == nil {
 		e.context = make(map[string]interface{}, e.smallCount)
-		for i := 0; i < e.smallCount; i++ {
+		for i := int32(0); i < e.smallCount; i++ {
 			e.context[e.smallContext[i].key] = e.smallContext[i].value
 		}
 	}
@@ -443,7 +431,7 @@ func (e *Error) Context() map[string]interface{} {
 // Trace ensures the error has a stack trace, capturing it if missing.
 // Does nothing if stack tracing is disabled; returns the error for chaining.
 func (e *Error) Trace() *Error {
-	if e.stack == nil && !currentConfig.disableStack {
+	if e.stack == nil {
 		e.stack = captureStack(1)
 	}
 	return e
@@ -484,7 +472,7 @@ func (e *Error) WithTemplate(template string) *Error {
 
 // WithCode sets an HTTP-like status code for the error and returns the error.
 func (e *Error) WithCode(code int) *Error {
-	e.code = code
+	e.code = int32(code)
 	return e
 }
 
@@ -517,7 +505,7 @@ func (e *Error) Callback(fn func()) *Error {
 // Code returns the error's status code, if set.
 // Returns 0 if no code is defined.
 func (e *Error) Code() int {
-	return e.code
+	return int(e.code)
 }
 
 var bufferPool = sync.Pool{
@@ -541,7 +529,7 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 	if e.smallCount > 0 || e.context != nil {
 		ctx = make(map[string]interface{}, e.smallCount)
 		// Copy key/value pairs from smallContext (the fast path)
-		for i := 0; i < e.smallCount && i < maxSmallItems; i++ {
+		for i := int32(0); i < e.smallCount && i < contextSize; i++ {
 			ctx[e.smallContext[i].key] = e.smallContext[i].value
 		}
 		// If a map has been allocated, copy its items as well.
@@ -558,7 +546,7 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 		Context: ctx,
 	}
 
-	if !currentConfig.disableStack && e.stack != nil {
+	if e.stack != nil {
 		je.Stack = e.Stack()
 	}
 
@@ -623,7 +611,7 @@ func (e *Error) Reset() {
 // Free resets the error and returns it to the pool, if pooling is enabled.
 // Does nothing beyond reset if pooling is disabled.
 func (e *Error) Free() {
-	if e.pooled && !currentConfig.disablePooling {
+	if !currentConfig.disablePooling {
 		e.Reset()
 		errorPool.Put(e)
 		// For Go 1.24+, the cleanup handler will handle it automatically
