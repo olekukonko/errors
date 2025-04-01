@@ -33,6 +33,7 @@ A dead simple, production-grade error handling library for Go with zero-cost abs
 • HTTP status code support  
 • Callback triggers
 
+
 ## Installation
 
 ```bash
@@ -44,49 +45,81 @@ go get github.com/olekukonko/errors@latest
 ### Basic Error Creation
 
 ```go
-// Simple error with automatic stack trace
-err := errors.New("database connection failed")
-fmt.Println(errors.Stack(err)) // Detailed stack trace
+package main
 
-// Formatted error
-err = errors.Newf("invalid value %q at position %d", "nil", 3)
+import (
+    "fmt"
+    "github.com/olekukonko/errors"
+)
 
-// Named error type
-err = errors.Named("AuthError")
+func main() {
+    // Simple error (no stack trace by default)
+    err := errors.New("database connection failed")
+    fmt.Println(err) // "database connection failed"
 
-// High-performance error (no stack trace)
-err = errors.Fast("critical path failure") 
+    // Error with stack trace
+    err = errors.Trace("database connection failed")
+    fmt.Println(errors.Stack(err)) // Detailed stack trace
+
+    // Formatted error
+    err = errors.Newf("invalid value %q at position %d", "nil", 3)
+    fmt.Println(err) // "invalid value \"nil\" at position 3"
+
+    // Named error with stack trace
+    err = errors.Named("AuthError")
+    fmt.Println(err) // "AuthError"
+}
 ```
 
 ### Contextual Errors
 
 ```go
-// Add structured context
-err := errors.New("file operation failed").
-    With("filename", "data.json").
-    With("attempt", 3).
-    With("retryable", true)
+package main
 
-// Extract context
-if ctx := errors.Context(err); ctx["retryable"] == true {
-    // Retry logic
+import (
+    "fmt"
+    "github.com/olekukonko/errors"
+)
+
+func main() {
+    // Add structured context (thread-safe)
+    err := errors.New("file operation failed").
+        With("filename", "data.json").
+        With("attempt", 3).
+        With("retryable", true)
+
+    // Extract context
+    if ctx := errors.Context(err); ctx != nil && ctx["retryable"] == true {
+        fmt.Println("Retrying due to:", err)
+    }
 }
 ```
 
 ### Error Management
 
 ```go
-// Configure global settings
-errors.Configure(errors.Config{
-    StackDepth:   64,      // Max stack frames
-    DisableStack: false,   // Enable traces
-    FilterInternal: true,  // Hide internal frames
-})
+package main
 
-// Template with status code
-var ErrNotFound = errors.Coded("NotFound", 404, "%s not found")
-err := ErrNotFound("user profile")
-fmt.Println(err.Code()) // 404
+import (
+    "fmt"
+    "github.com/olekukonko/errors"
+    "github.com/olekukonko/errors/errmgr"
+)
+
+func main() {
+    // Configure global settings
+    errors.Configure(errors.Config{
+        StackDepth:     64,     // Max stack frames
+        DisablePooling: false,  // Enable pooling by default
+        FilterInternal: true,   // Hide internal frames
+    })
+
+    // Template with status code
+    var ErrNotFound = errmgr.Coded("NotFound", "resource %s not found", 404)
+    err := ErrNotFound("user profile")
+    fmt.Println(err)        // "resource user profile not found"
+    fmt.Println(err.Code()) // 404
+}
 ```
 
 ## Core Concepts
@@ -94,45 +127,85 @@ fmt.Println(err.Code()) // 404
 ### Stack Traces
 
 ```go
-err := errors.New("example").Trace()
+package main
 
-// Detailed trace
-for _, frame := range err.Stack() {
-    fmt.Printf("%s\n\t%s:%d\n", frame.Function, frame.File, frame.Line)
+import (
+    "fmt"
+    "github.com/olekukonko/errors"
+)
+
+func main() {
+    err := errors.New("example").WithStack()
+
+    // Detailed trace
+    for _, frame := range err.Stack() {
+        fmt.Println(frame) // e.g., "main.main\n\tmain.go:10"
+    }
+
+    // Lightweight trace
+    fmt.Println(err.FastStack()) // e.g., ["main.go:10", "caller.go:42"]
 }
-
-// Lightweight trace
-fmt.Println(err.FastStack()) // ["file.go:123", "main.go:42"]
 ```
 
 ### Error Pooling (Automatic)
 
 ```go
-// Enabled by default in Go 1.24+
-err := errors.New("temporary")
-// Automatically returns to pool when unreachable
+package main
 
-// Manual control (optional)
-err.Free() // Explicit return to pool
+import (
+    "fmt"
+    "github.com/olekukonko/errors"
+)
+
+func main() {
+    // Enabled by default in Go 1.24+ with autofree
+    err := errors.New("temporary")
+    fmt.Println(err) // "temporary"
+    // Automatically returns to pool when unreachable (GC-triggered)
+
+    // Manual control (recommended for deterministic cleanup)
+    err = errors.New("manual")
+    fmt.Println(err) // "manual"
+    err.Free()       // Explicitly return to pool
+}
 ```
 
 ### Error Monitoring
 
 ```go
-// Track error occurrences
-monitor := errors.NewMonitor("DBError", 5) // Threshold=5
-defer monitor.Close()
+package main
 
-go func() {
-    for alert := range monitor.Alerts() {
-        fmt.Printf("ALERT: %s occurred %d times\n", 
-            alert.Name, alert.Count)
+import (
+    "fmt"
+    "time"
+    "github.com/olekukonko/errors"
+    "github.com/olekukonko/errors/errmgr"
+)
+
+func main() {
+    // Define a templated error
+    dbError := errmgr.Define("DBError", "database error: %s")
+
+    // Set up monitoring for "DBError"
+    monitor := errmgr.NewMonitor("DBError")
+    errmgr.SetThreshold("DBError", 5) // Alert after 5 occurrences
+    defer monitor.Close()
+
+    go func() {
+        for alert := range monitor.Alerts() {
+            fmt.Printf("ALERT: %s occurred %d times\n", 
+                alert.Name(), alert.Count())
+        }
+    }()
+
+    // Simulate errors with the same name
+    for i := 0; i < 10; i++ {
+        err := dbError(fmt.Sprintf("simulated failure %d", i))
+        err.Free()
     }
-}()
 
-// Simulate errors
-for i := 0; i < 10; i++ {
-    errors.Named("DBError").Increment()
+    // Give the goroutine time to process alerts
+    time.Sleep(100 * time.Millisecond)
 }
 ```
 
@@ -141,50 +214,140 @@ for i := 0; i < 10; i++ {
 ### Retry Mechanism
 
 ```go
-retry := errors.NewRetry(
-    errors.WithBackoff(100*time.Millisecond),
-    errors.WithJitter(50*time.Millisecond),
+package main
+
+import (
+    "fmt"
+    "time"
+    "github.com/olekukonko/errors"
 )
 
-err := retry.Execute(func() error {
-    return callFlakyService()
-})
+func callFlakyService() error {
+    return errors.New("service unavailable").WithRetryable()
+}
 
-if errors.IsRetryable(err) {
-    // Handle retry exhaustion
+func main() {
+    retry := errors.NewRetry(
+        errors.WithDelay(100*time.Millisecond),
+        errors.WithJitter(true),
+        errors.WithMaxAttempts(3),
+        errors.WithOnRetry(func(attempt int, err error) {
+            fmt.Printf("Attempt %d failed: %v\n", attempt, err)
+        }),
+    )
+
+    err := retry.Execute(func() error {
+        return callFlakyService()
+    })
+
+    if err != nil {
+        fmt.Println("Retry exhausted with error:", err)
+    } else {
+        fmt.Println("Service call succeeded")
+    }
 }
 ```
 
 ### Multi-Error Aggregation
 
 ```go
-batch := errors.NewBatch()
+package main
 
-batch.Add(validateInput(input))
-batch.Add(checkPermissions(user)))
-batch.Add(updateDatabase(record)))
+import (
+    "fmt"
+    "github.com/olekukonko/errors"
+)
 
-if batch.Failed() {
-    fmt.Printf("Failed with %d errors:\n%v", 
-        batch.Count(), batch)
+func validateInput(input string) error {
+    return errors.New("invalid input")
+}
+
+func checkPermissions(user string) error {
+    return nil
+}
+
+func updateDatabase(record string) error {
+    return errors.New("db update failed")
+}
+
+func main() {
+    multi := errors.NewMultiError()
+
+    multi.Add(validateInput("input"))
+    multi.Add(checkPermissions("user"))
+    multi.Add(updateDatabase("record"))
+
+    if multi.HasError() {
+        fmt.Printf("Failed with %d errors:\n%v\n", 
+            len(multi.Errors()), multi)
+    }
 }
 ```
 
 ### HTTP Error Handling
 
 ```go
+package main
+
+import (
+    "encoding/json"
+    "fmt"
+    "net/http"
+    "github.com/olekukonko/errors"
+)
+
+func fetchUser(id string) (string, error) {
+    return "", errors.New("user not found")
+}
+
 func getUserHandler(w http.ResponseWriter, r *http.Request) {
     user, err := fetchUser(r.URL.Query().Get("id"))
     if err != nil {
-        err := errors.Wrap(err, "getUserHandler").
+        err = errors.Wrap(err, "failed to fetch user").
             With("path", r.URL.Path).
             WithCode(404)
-            
+
         w.WriteHeader(err.Code())
-        json.NewEncoder(w).Encode(err)
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "error":   err.Error(),
+            "context": err.Context(),
+            "code":    err.Code(),
+        })
         return
     }
-    // ...
+    fmt.Fprintf(w, "User: %s", user)
+}
+
+func main() {
+    http.HandleFunc("/user", getUserHandler)
+    fmt.Println("Server running on :8080")
+    http.ListenAndServe(":8080", nil)
+}
+```
+
+### Error Callback
+
+```go
+package main
+
+import (
+    "fmt"
+    "github.com/olekukonko/errors"
+)
+
+func main() {
+    // Error with callback for logging or side effects
+    count := 0
+    err := errors.New("operation failed").
+        Callback(func() {
+            count++
+            fmt.Printf("Error accessed %d times\n", count)
+        })
+
+    // Trigger callback each time Error() is called
+    fmt.Println(err) // "operation failed" + "Error accessed 1 times"
+    fmt.Println(err) // "operation failed" + "Error accessed 2 times"
+    err.Free()
 }
 ```
 
@@ -193,21 +356,32 @@ func getUserHandler(w http.ResponseWriter, r *http.Request) {
 ### Configuration Tuning
 
 ```go
-// For high-throughput services
-errors.Configure(errors.Config{
-    DisableStack:   true,  // Skip traces
-    DisablePooling: false, // Enable pooling
-    ContextSize:    1,     // Optimize for 1-2 context items
-})
+package main
+
+import (
+    "github.com/olekukonko/errors"
+)
+
+func main() {
+    // For high-throughput services
+    errors.Configure(errors.Config{
+        DisablePooling: false, // Enable pooling for zero allocations
+        ContextSize:    1,     // Optimize for minimal context
+    })
+
+    // Stack traces are opt-in
+    err := errors.New("fast error") // No stack trace
+    err = errors.Trace("debug error") // With stack trace
+    err.Free()
+}
 ```
 
 ### Memory Efficiency
 
 ```go
-type contextItem struct {
-    key   string
-    value interface{}
-}
+package main
+
+import "github.com/olekukonko/errors"
 
 // Memory layout (optimized)
 type Error struct {
@@ -216,8 +390,16 @@ type Error struct {
     stack    []uintptr
     
     // Cold path
-    smallContext [2]contextItem // No allocation for ≤2 items
+    smallContext [2]errors.contextItem // No allocation for ≤2 items
+    context      map[string]interface{} // Lazy-allocated for >2 items
     // ...
+}
+
+func main() {
+    err := errors.New("example").
+        With("key1", "value1").
+        With("key2", "value2") // Uses smallContext, no allocation
+    err.Free()
 }
 ```
 
@@ -225,40 +407,120 @@ type Error struct {
 
 ### From Standard Errors
 
-1. Replace `fmt.Errorf()` with `errors.Newf()`
-2. Convert `errors.New()` to `errors.New()` as normal
-3. Add context with `.With()` instead of string formatting
-4. Use `errors.Is()`/`errors.As()` as normal
+```go
+package main
+
+import (
+    "fmt"
+    "github.com/olekukonko/errors"
+)
+
+func main() {
+    // Old: fmt.Errorf
+    oldErr := fmt.Errorf("error: %s", "something went wrong")
+    
+    // New: errors.Newf
+    newErr := errors.Newf("error: %s", "something went wrong").
+        With("details", "extra info")
+    
+    fmt.Println(oldErr) // "error: something went wrong"
+    fmt.Println(newErr) // "error: something went wrong"
+    fmt.Println(newErr.Context()) // map[details:extra info]
+}
+```
 
 ### From pkg/errors
 
-1. Replace `Wrap()` with `errors.Wrapf()`
-2. Use `errors.Stack()` instead of `StackTrace()`
-3. Enable pooling for better performance
-4. Leverage structured context instead of error messages
+```go
+package main
+
+import (
+    "fmt"
+    "github.com/olekukonko/errors"
+)
+
+func main() {
+    // Old: pkg/errors.Wrap
+    // err := pkgerrors.Wrap(errors.New("base"), "wrapped")
+    
+    // New: errors.Wrapf
+    err := errors.Wrapf(errors.New("base"), "wrapped with %s", "details").
+        WithStack()
+    
+    fmt.Println(err)        // "wrapped with details: base"
+    fmt.Println(err.Stack()) // Stack trace
+    err.Free()
+}
+```
 
 ## FAQ
 
-**Q: When should I call Free()?**  
-A: Only when you need deterministic memory reclamation. The pool automatically handles cleanup in Go 1.24+.
-
-**Q: How to disable stack traces?**
+**Q: When should I call Free()?**
 ```go
-errors.Configure(errors.Config{DisableStack: true})
+package main
+
+import (
+    "fmt"
+    "github.com/olekukonko/errors"
+)
+
+func main() {
+    err := errors.New("example")
+    fmt.Println(err) // "example"
+    err.Free()       // Call Free() for immediate pool return
+    // In Go 1.24+, autofree handles it when unreachable
+}
+```
+
+**Q: How do I avoid stack traces for performance?**
+```go
+package main
+
+import (
+    "fmt"
+    "github.com/olekukonko/errors"
+)
+
+func main() {
+    err := errors.New("fast error") // No stack trace
+    fmt.Println(err) // "fast error"
+    
+    err = errors.Trace("debug error") // With stack trace
+    fmt.Println(err.Stack()) // Stack trace
+    err.Free()
+}
 ```
 
 **Q: Can I use this with middleware?**
 ```go
+package main
+
+import (
+    "fmt"
+    "net/http"
+    "github.com/olekukonko/errors"
+)
+
 func ErrorMiddleware(next http.Handler) http.Handler {
-return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-defer func() {
-if err := recover(); err != nil {
-errors.New("panic").With("path", r.URL.Path)
-// ...
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        defer func() {
+            if err := recover(); err != nil {
+                e := errors.New("panic recovered").
+                    With("path", r.URL.Path).
+                    WithStack()
+                fmt.Println(e) // Log or handle
+                e.Free()
+            }
+        }()
+        next.ServeHTTP(w, r)
+    })
 }
-}()
-next.ServeHTTP(w, r)
-})
+
+func main() {
+    http.Handle("/", ErrorMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        panic("test panic")
+    })))
+    http.ListenAndServe(":8080", nil)
 }
 ```
 
