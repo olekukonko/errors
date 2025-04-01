@@ -16,7 +16,7 @@ func init() {
 	errorPool = sync.Pool{
 		New: func() interface{} {
 			e := &Error{
-				smallContext: [2]contextItem{},
+				smallContext: [contextSize]contextItem{},
 				stack:        make([]uintptr, 0, currentConfig.stackDepth),
 			}
 			if currentConfig.autofree {
@@ -40,7 +40,7 @@ func init() {
 		filterInternal: true,
 		autofree:       true,
 	}
-	WarmPool(100)
+	WarmPool(warmUpSize)
 }
 
 func getPooledError() *Error {

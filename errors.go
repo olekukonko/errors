@@ -50,8 +50,6 @@ type cachedConfig struct {
 var (
 	currentConfig cachedConfig
 	configMu      sync.RWMutex
-	poolHits      uint64 // Tracks pool hits for debugging; can be removed in production.
-	poolMisses    uint64 // Tracks pool misses for debugging; can be removed in production.
 )
 
 func init() {
@@ -319,15 +317,22 @@ func (e *Error) Increment() *Error {
 }
 
 // Stack returns a detailed stack trace as a slice of strings.
-// Captures the stack lazily if not already present and stack tracing is enabled.
+// Filters internal frames if FilterInternal is enabled in the configuration.
 func (e *Error) Stack() []string {
 	if e.stack == nil {
 		return nil
 	}
+	configMu.RLock()
+	filter := currentConfig.filterInternal
+	configMu.RUnlock()
+
 	frames := runtime.CallersFrames(e.stack)
 	var trace []string
 	for {
 		frame, more := frames.Next()
+		if filter && isInternalFrame(frame) {
+			continue // Skip internal frames
+		}
 		trace = append(trace, fmt.Sprintf("%s\n\t%s:%d",
 			frame.Function, frame.File, frame.Line))
 		if !more {
@@ -338,21 +343,28 @@ func (e *Error) Stack() []string {
 }
 
 // FastStack returns a lightweight stack trace without filtering or function names.
-// It is faster than Stack() but provides less detail, only file:line pairs.
+// Filters internal frames if FilterInternal is enabled in the configuration.
 func (e *Error) FastStack() []string {
 	if e.stack == nil {
 		return nil
 	}
+	configMu.RLock()
+	filter := currentConfig.filterInternal
+	configMu.RUnlock()
+
 	pcs := e.stack
-	frames := make([]string, len(pcs))
-	for i, pc := range pcs {
+	frames := make([]string, 0, len(pcs))
+	for _, pc := range pcs {
 		fn := runtime.FuncForPC(pc)
 		if fn == nil {
-			frames[i] = "unknown"
+			frames = append(frames, "unknown")
 			continue
 		}
 		file, line := fn.FileLine(pc)
-		frames[i] = fmt.Sprintf("%s:%d", file, line)
+		if filter && isInternalFrame(runtime.Frame{File: file, Function: fn.Name()}) {
+			continue // Skip internal frames
+		}
+		frames = append(frames, fmt.Sprintf("%s:%d", file, line))
 	}
 	return frames
 }

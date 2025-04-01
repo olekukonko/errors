@@ -69,6 +69,20 @@ func getFuncName(fn interface{}) string {
 	return strings.TrimPrefix(fullName, ".")
 }
 
+// isInternalFrame determines if a stack frame is considered "internal".
+// Filters frames from runtime, reflect, or this package if FilterInternal is true.
+func isInternalFrame(frame runtime.Frame) bool {
+	// Filter runtime and reflect packages
+	if strings.HasPrefix(frame.Function, "runtime.") || strings.HasPrefix(frame.Function, "reflect.") {
+		return true
+	}
+	// Filter frames from this package
+	if strings.Contains(frame.File, "github.com/olekukonko/errors") {
+		return true
+	}
+	return false
+}
+
 // FormatError returns a formatted string representation of an error, including its message,
 // stack trace, and context if it’s an enhanced *Error.
 // Useful for logging or debugging.

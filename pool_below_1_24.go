@@ -17,7 +17,7 @@ func init() {
 		New: func() interface{} {
 			e := &Error{
 				pooled:       true,
-				smallContext: [2]contextItem{},
+				smallContext: [contextSize]contextItem{},
 				stack:        make([]uintptr, 0, currentConfig.stackDepth),
 			}
 			if currentConfig.autofree {
@@ -42,7 +42,7 @@ func init() {
 		filterInternal: true,
 		autofree:       false,
 	}
-	WarmPool(100)
+	WarmPool(warmUpSize)
 }
 
 func getPooledError() *Error {
