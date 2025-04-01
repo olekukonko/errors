@@ -15,6 +15,7 @@ func TestNew(t *testing.T) {
 	if len(err.Stack()) == 0 {
 		t.Errorf("New() should capture stack trace")
 	}
+	err.Free() // Clean up
 }
 
 func TestNewf(t *testing.T) {
@@ -40,6 +41,7 @@ func TestNamed(t *testing.T) {
 
 func TestErrorMethods(t *testing.T) {
 	err := New("base error")
+	defer err.Free()
 
 	// Test With
 	err = err.With("key", "value")
@@ -49,15 +51,16 @@ func TestErrorMethods(t *testing.T) {
 
 	// Test Wrap
 	cause := New("cause error")
+	defer cause.Free()
 	err = err.Wrap(cause)
 	if err.Unwrap() != cause {
 		t.Errorf("Wrap() failed, unwrapped = %v, want %v", err.Unwrap(), cause)
 	}
 
-	// Test Msg
-	err = err.Msg("new message %d", 123)
+	// Test Msgf
+	err = err.Msgf("new message %d", 123)
 	if err.Error() != "new message 123" {
-		t.Errorf("Msg() failed, error = %v, want %v", err.Error(), "new message 123")
+		t.Errorf("Msgf() failed, error = %v, want %v", err.Error(), "new message 123")
 	}
 
 	// Test Trace (already captured, should not overwrite)

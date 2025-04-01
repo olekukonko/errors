@@ -1,6 +1,7 @@
 package errors
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -16,11 +17,19 @@ func BenchmarkNewError(b *testing.B) {
 
 // BenchmarkNewNoStack measures New without stack traces.
 func BenchmarkNewNoStack(b *testing.B) {
-	DisableStack = true
-	defer func() { DisableStack = false }()
+	Configure(Config{DisableStack: true}) // Replace DisableStack = true
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		err := New("test error")
+		err.Free()
+	}
+}
+
+// BenchmarkFastNew measures the lightweight FastNew performance.
+func BenchmarkFastNew(b *testing.B) {
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		err := Fast("test error")
 		err.Free()
 	}
 }
@@ -42,8 +51,18 @@ func BenchmarkNamedError(b *testing.B) {
 	}
 }
 
-// BenchmarkErrorWithContext measures adding context performance.
+// BenchmarkErrorWithContext measures adding context performance with small cache.
 func BenchmarkErrorWithContext(b *testing.B) {
+	err := New("base error")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = err.With("key", i) // Should use smallContext
+	}
+	err.Free()
+}
+
+// BenchmarkErrorWithOne measures adding a single context item performance.
+func BenchmarkErrorWithOne(b *testing.B) {
 	err := New("base error")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -67,21 +86,21 @@ func BenchmarkErrorWrapping(b *testing.B) {
 func BenchmarkTemplateError(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		err := ErrDatabase("connection failed")
+		err := ErrDBConnection("connection failed")
 		err.Free()
 	}
 }
 
 // BenchmarkErrorStackCapture measures lazy stack capture performance.
 func BenchmarkErrorStackCapture(b *testing.B) {
-	DisableStack = true // Start without stack
-	defer func() { DisableStack = false }()
+	Configure(Config{DisableRegistry: true}) // Replace DisableRegistry = true
 	err := New("test")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = err.Stack()
 	}
 	err.Free()
+	Configure(Config{DisableRegistry: false})
 }
 
 // BenchmarkIs measures Is performance.
@@ -122,12 +141,28 @@ func BenchmarkCount(b *testing.B) {
 
 // BenchmarkCountNoRegistry measures Count with registry disabled.
 func BenchmarkCountNoRegistry(b *testing.B) {
-	DisableRegistry = true
-	defer func() { DisableRegistry = false }()
+	Configure(Config{DisableRegistry: true}) // Replace DisableRegistry = true
 	err := Named("test_count")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = err.Count()
 	}
 	err.Free()
+}
+
+func BenchmarkJSONMarshal(b *testing.B) {
+	err := New("test").With("key1", "value1").With("key2", 42)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = json.Marshal(err)
+	}
+}
+
+func BenchmarkConcurrentErrorCreation(b *testing.B) {
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			err := New("concurrent error")
+			err.Free()
+		}
+	})
 }
