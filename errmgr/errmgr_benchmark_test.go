@@ -35,7 +35,7 @@ func BenchmarkCategorizedError(b *testing.B) {
 
 // BenchmarkCallableError measures the performance of creating custom callable errors.
 func BenchmarkCallableError(b *testing.B) {
-	fn := Callable("custom", func(args ...interface{}) *errors.Error {
+	fn := Tracked("custom", func(args ...interface{}) *errors.Error {
 		return errors.New(fmt.Sprintf("custom %v", args[0]))
 	})
 	b.ResetTimer()

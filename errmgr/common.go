@@ -3,7 +3,9 @@
 // directly as immutable instances or copied for customization using Copy().
 package errmgr
 
-import "github.com/olekukonko/errors"
+import (
+	"github.com/olekukonko/errors"
+)
 
 // Common error categories used for organizing errors across different domains.
 const (
@@ -29,7 +31,7 @@ const (
 	CodeServiceUnavailable = 503 // HTTP 503 Service Unavailable (temporary unavailability)
 )
 
-// Generic Predefined Errors
+// Generic Predefined Errors (Static)
 var (
 	ErrInvalidArg = errors.New("invalid argument")
 	ErrNotFound   = errors.New("not found")
@@ -38,71 +40,71 @@ var (
 	ErrUnknown    = errors.New("unknown error")
 )
 
-// Authentication Errors
+// Authentication Errors (Templated)
 var (
-	ErrAuthFailed   = Coded("ErrAuthFailed", CodeUnauthorized, "authentication failed for %s: %s")
-	ErrInvalidToken = errors.New("invalid authentication token").WithCode(CodeUnauthorized)
-	ErrTokenExpired = errors.New("authentication token expired").WithCode(CodeUnauthorized)
-	ErrMissingCreds = errors.New("missing credentials").WithCode(CodeBadRequest)
+	ErrAuthFailed   = Define("ErrAuthFailed", "authentication failed for %s: %s")
+	ErrInvalidToken = Define("ErrInvalidToken", "invalid authentication token: %s")
+	ErrTokenExpired = Define("ErrTokenExpired", "authentication token expired: %s")
+	ErrMissingCreds = Define("ErrMissingCreds", "missing credentials: %s")
 )
 
-// Database Errors
+// Database Errors (Templated)
 var (
-	ErrDBConnection = Coded("ErrDBConnection", CodeInternalError, "database connection failed: %s")
-	ErrDBQuery      = Coded("ErrDBQuery", CodeInternalError, "database query failed: %s")
-	ErrDBTimeout    = errors.New("database operation timed out").WithCode(CodeInternalError).WithRetryable()
-	ErrDBConstraint = Coded("ErrDBConstraint", CodeBadRequest, "database constraint violation: %s")
+	ErrDBConnection = Define("ErrDBConnection", "database connection failed: %s")
+	ErrDBQuery      = Define("ErrDBQuery", "database query failed: %s")
+	ErrDBTimeout    = Define("ErrDBTimeout", "database operation timed out: %s")
+	ErrDBConstraint = Define("ErrDBConstraint", "database constraint violation: %s")
 )
 
-// Network Errors
+// Network Errors (Templated)
 var (
-	ErrNetworkUnreachable = Coded("ErrNetworkUnreachable", CodeInternalError, "network unreachable: %s")
-	ErrNetworkTimeout     = errors.New("network timeout").WithCode(CodeInternalError).WithRetryable()
-	ErrNetworkConnRefused = errors.New("connection refused").WithCode(CodeInternalError)
+	ErrNetworkUnreachable = Define("ErrNetworkUnreachable", "network unreachable: %s")
+	ErrNetworkTimeout     = Define("ErrNetworkTimeout", "network timeout: %s")
+	ErrNetworkConnRefused = Define("ErrNetworkConnRefused", "connection refused: %s")
 )
 
-// IO Errors
+// IO Errors (Templated)
 var (
-	ErrIORead       = Coded("ErrIORead", CodeInternalError, "I/O read error: %s")
-	ErrIOWrite      = Coded("ErrIOWrite", CodeInternalError, "I/O write error: %s")
-	ErrFileNotFound = errors.New("file not found").WithCode(CodeNotFound)
+	ErrIORead       = Define("ErrIORead", "I/O read error: %s")
+	ErrIOWrite      = Define("ErrIOWrite", "I/O write error: %s")
+	ErrFileNotFound = Define("ErrFileNotFound", "file (%s) not found")
 )
 
-// Validation Errors
+// Validation Errors (Templated)
 var (
-	ErrValidationFailed = Coded("ErrValidationFailed", CodeBadRequest, "validation failed: %s")
-	ErrInvalidFormat    = Coded("ErrInvalidFormat", CodeBadRequest, "invalid format: %s")
+	ErrValidationFailed = Define("ErrValidationFailed", "validation failed: %s")
+	ErrInvalidFormat    = Define("ErrInvalidFormat", "invalid format: %s")
 )
 
-// Business Logic Errors
+// Business Logic Errors (Templated)
 var (
-	ErrBusinessRule      = Coded("ErrBusinessRule", CodeBadRequest, "business rule violation: %s")
-	ErrInsufficientFunds = errors.New("insufficient funds").WithCode(CodeBadRequest)
+	ErrBusinessRule      = Define("ErrBusinessRule", "business rule violation: %s")
+	ErrInsufficientFunds = Define("ErrInsufficientFunds", "insufficient funds: %s")
 )
 
-// System Errors
+// System Errors (Templated)
 var (
-	ErrSystemFailure     = Coded("ErrSystemFailure", CodeInternalError, "system failure: %s")
-	ErrResourceExhausted = errors.New("resource exhausted").WithCode(CodeInternalError)
+	ErrSystemFailure     = Define("ErrSystemFailure", "system failure: %s")
+	ErrResourceExhausted = Define("ErrResourceExhausted", "resource exhausted: %s")
 )
 
-// Additional HTTP-related Errors
+// Additional HTTP-related Errors (Templated)
 var (
-	ErrConflict           = Coded("ErrConflict", CodeConflict, "conflict occurred: %s")
-	ErrRateLimitExceeded  = Coded("ErrRateLimitExceeded", CodeTooManyRequests, "rate limit exceeded: %s")
-	ErrNotImplemented     = errors.New("not implemented").WithCode(CodeNotImplemented)
-	ErrServiceUnavailable = errors.New("service unavailable").WithCode(CodeServiceUnavailable)
+	ErrConflict           = Define("ErrConflict", "conflict occurred: %s")
+	ErrRateLimitExceeded  = Define("ErrRateLimitExceeded", "rate limit exceeded: %s")
+	ErrNotImplemented     = Define("ErrNotImplemented", "%s not implemented")
+	ErrServiceUnavailable = Define("ErrServiceUnavailable", "service (%s) unavailable")
 )
 
-// Additional Domain-Specific Errors
+// Additional Domain-Specific Errors (Templated)
 var (
-	ErrSerialization        = Coded("ErrSerialization", CodeBadRequest, "serialization error: %s")
-	ErrDeserialization      = Coded("ErrDeserialization", CodeBadRequest, "deserialization error: %s")
-	ErrExternalService      = errors.New("external service error").WithCode(CodeInternalError).WithRetryable()
-	ErrUnsupportedOperation = errors.New("unsupported operation").WithCode(CodeBadRequest)
+	ErrSerialization        = Define("ErrSerialization", "serialization error: %s")
+	ErrDeserialization      = Define("ErrDeserialization", "deserialization error: %s")
+	ErrExternalService      = Define("ErrExternalService", "external service (%s) error")
+	ErrUnsupportedOperation = Define("ErrUnsupportedOperation", "unsupported operation %s")
 )
 
-// Predefined Templates with Categories
+// Predefined Templates with Categories (Templated)
 var (
 	AuthFailed      = Categorized(CategoryAuth, "AuthFailed", "authentication failed for %s: %s")
 	DBError         = Categorized(CategoryDatabase, "DBError", "database error: %s")

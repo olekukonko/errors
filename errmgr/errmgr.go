@@ -14,15 +14,24 @@ import (
 
 // Config holds configuration for the errmgr package.
 type Config struct {
-	DisableErrMgr bool // Disables counting and tracking
+	DisableErrMgr bool // Disables counting and tracking if true
+}
+
+// cachedConfig holds the current configuration, updated only on Configure().
+type cachedConfig struct {
+	disableErrMgr bool
 }
 
 var (
-	configMu sync.RWMutex
-	config   = Config{DisableErrMgr: false}
-	registry = errorRegistry{counts: shardedCounter{}}
-	codes    = codeRegistry{m: make(map[string]int)}
+	currentConfig cachedConfig
+	configMu      sync.RWMutex
+	registry      = errorRegistry{counts: shardedCounter{}}
+	codes         = codeRegistry{m: make(map[string]int)}
 )
+
+func init() {
+	currentConfig = cachedConfig{disableErrMgr: false}
+}
 
 // errorRegistry holds registered errors and their metadata.
 type errorRegistry struct {
@@ -45,14 +54,16 @@ type shardedCounter struct {
 	counts sync.Map // map[string]*[8]struct{value uint64; pad [56]byte}
 }
 
-// Configure sets configuration options for the errmgr package.
+// Configure updates the global configuration for the errmgr package.
+// It is thread-safe and applies immediately to all operations.
 func Configure(cfg Config) {
 	configMu.Lock()
-	defer configMu.Unlock()
-	config = cfg
+	currentConfig = cachedConfig{disableErrMgr: cfg.DisableErrMgr}
+	configMu.Unlock()
 }
 
-// Inc increments the counter for a specific name in a shard.
+// Inc increments the counter for a specific name in a shard and checks thresholds.
+// Returns the new total count for the name.
 func (c *shardedCounter) Inc(name string) uint64 {
 	shardPtr, _ := c.counts.LoadOrStore(name, &[8]struct {
 		value uint64
@@ -63,7 +74,24 @@ func (c *shardedCounter) Inc(name string) uint64 {
 		pad   [56]byte
 	})
 	shard := uint64(uintptr(unsafe.Pointer(&shards))) % 8
-	return atomic.AddUint64(&shards[shard].value, 1)
+	newCount := atomic.AddUint64(&shards[shard].value, 1)
+
+	// Check thresholds and trigger alerts
+	if thresh, ok := registry.thresholds.Load(name); ok {
+		total := c.Value(name)
+		if total >= thresh.(uint64) {
+			if ch, ok := registry.alerts.Load(name); ok {
+				go func() {
+					// Non-blocking send to avoid deadlocks
+					select {
+					case ch.(chan *errors.Error) <- errors.New(fmt.Sprintf("%s count exceeded threshold: %d", name, total)):
+					default:
+					}
+				}()
+			}
+		}
+	}
+	return newCount
 }
 
 // Value returns the total count for a specific name across all shards.
@@ -95,7 +123,7 @@ func (c *shardedCounter) Reset(name string) {
 	}
 }
 
-// RegisterName ensures a counter exists for the name.
+// RegisterName ensures a counter exists for the name without incrementing it.
 func (c *shardedCounter) RegisterName(name string) {
 	c.counts.LoadOrStore(name, &[8]struct {
 		value uint64
@@ -103,7 +131,7 @@ func (c *shardedCounter) RegisterName(name string) {
 	}{})
 }
 
-// ListNames returns all registered error names.
+// ListNames returns all registered error names in the counter.
 func (c *shardedCounter) ListNames() []string {
 	var names []string
 	c.counts.Range(func(key, _ interface{}) bool {
@@ -113,12 +141,11 @@ func (c *shardedCounter) ListNames() []string {
 	return names
 }
 
-// Define registers an error template and returns a function to create errors.
+// Define creates a templated error that formats a message with provided arguments.
+// The error is tracked in the registry if error management is enabled.
 func Define(name, template string) func(...interface{}) *errors.Error {
 	registry.templates.Store(name, template)
-	configMu.RLock()
-	defer configMu.RUnlock()
-	if !config.DisableErrMgr {
+	if !currentConfig.disableErrMgr {
 		registry.counts.RegisterName(name)
 	}
 	return func(args ...interface{}) *errors.Error {
@@ -126,29 +153,25 @@ func Define(name, template string) func(...interface{}) *errors.Error {
 		buf.Grow(len(template) + len(name) + len(args)*10)
 		fmt.Fprintf(&buf, template, args...)
 		err := errors.New(buf.String()).WithName(name).WithTemplate(template)
-		configMu.RLock()
-		defer configMu.RUnlock()
-		if !config.DisableErrMgr {
+		if !currentConfig.disableErrMgr {
 			registry.counts.Inc(name)
 		}
 		return err
 	}
 }
 
-// Coded registers a template with an HTTP code and returns a function to create errors.
-func Coded(name string, code int, template string) func(...interface{}) *errors.Error {
-	codes.mu.Lock()
-	codes.m[name] = code
-	codes.mu.Unlock()
-	f := Define(name, template)
+// Coded creates a templated error with a specific HTTP status code.
+// It wraps Define and applies the code to each error instance returned.
+func Coded(name, template string, code int) func(...interface{}) *errors.Error {
+	base := Define(name, template)
 	return func(args ...interface{}) *errors.Error {
-		err := f(args...)
-		err.WithCode(code)
-		return err
+		err := base(args...)
+		return err.WithCode(code)
 	}
 }
 
 // Categorized creates a categorized error template and returns a function to create errors.
+// The returned function applies the category to each error instance.
 func Categorized(category errors.ErrorCategory, name, template string) func(...interface{}) *errors.Error {
 	f := Define(name, template)
 	return func(args ...interface{}) *errors.Error {
@@ -156,18 +179,15 @@ func Categorized(category errors.ErrorCategory, name, template string) func(...i
 	}
 }
 
-// Callable registers a custom error function and returns it.
-func Callable(name string, fn func(...interface{}) *errors.Error) func(...interface{}) *errors.Error {
+// Tracked registers a custom error function and tracks its occurrences in the registry.
+// The returned function increments the error count each time it is called.
+func Tracked(name string, fn func(...interface{}) *errors.Error) func(...interface{}) *errors.Error {
 	registry.funcs.Store(name, fn)
-	configMu.RLock()
-	defer configMu.RUnlock()
-	if !config.DisableErrMgr {
+	if !currentConfig.disableErrMgr {
 		registry.counts.RegisterName(name)
 	}
 	return func(args ...interface{}) *errors.Error {
-		configMu.RLock()
-		defer configMu.RUnlock()
-		if !config.DisableErrMgr {
+		if !currentConfig.disableErrMgr {
 			registry.counts.Inc(name)
 		}
 		return fn(args...)
@@ -175,10 +195,9 @@ func Callable(name string, fn func(...interface{}) *errors.Error) func(...interf
 }
 
 // Metrics returns a snapshot of error counts for monitoring systems.
+// Returns nil if error management is disabled.
 func Metrics() map[string]uint64 {
-	configMu.RLock()
-	defer configMu.RUnlock()
-	if config.DisableErrMgr {
+	if currentConfig.disableErrMgr {
 		return nil
 	}
 	counts := make(map[string]uint64)
@@ -193,24 +212,35 @@ func Metrics() map[string]uint64 {
 	return counts
 }
 
-// ResetCounter resets the occurrence counter for an error type.
+// ResetCounter resets the occurrence counter for a specific error type.
+// Has no effect if error management is disabled.
 func ResetCounter(name string) {
-	configMu.RLock()
-	defer configMu.RUnlock()
-	if !config.DisableErrMgr {
+	if !currentConfig.disableErrMgr {
 		registry.counts.Reset(name)
 	}
 }
 
+// Reset clears all counters and removes their registrations.
+// Has no effect if error management is disabled.
 func Reset() {
-	configMu.RLock()
-	defer configMu.RUnlock()
-	if config.DisableErrMgr {
+	if currentConfig.disableErrMgr {
 		return
 	}
 	registry.counts.counts.Range(func(key, _ interface{}) bool {
 		registry.counts.Reset(key.(string))
-		registry.counts.counts.Delete(key) // Remove the key entirely
+		registry.counts.counts.Delete(key)
 		return true
 	})
+}
+
+// SetThreshold sets a count threshold for an error name, triggering alerts when exceeded.
+// Alerts are sent to the Monitor channel if one exists for the name.
+func SetThreshold(name string, threshold uint64) {
+	registry.thresholds.Store(name, threshold)
+}
+
+// Err creates a new instance of a predefined static error, ensuring immutability of originals.
+// Use this for static errors; templated errors should be called directly with arguments.
+func Err(err *errors.Error) *errors.Error {
+	return err.Copy()
 }

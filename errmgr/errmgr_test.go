@@ -38,7 +38,7 @@ func TestDefine(t *testing.T) {
 
 func TestCallable(t *testing.T) {
 	ResetCounter("test_call")
-	fn := Callable("test_call", func(args ...interface{}) *errors.Error {
+	fn := Tracked("test_call", func(args ...interface{}) *errors.Error {
 		return errors.Named("test_call").Msgf("called with %v", args[0])
 	})
 	err := fn("arg1")
@@ -53,7 +53,7 @@ func TestCallable(t *testing.T) {
 
 func TestCoded(t *testing.T) {
 	ResetCounter("test_coded")
-	tmpl := Coded("test_coded", 400, "coded error: %s")
+	tmpl := Coded("test_coded", "coded error: %s", 400)
 	err := tmpl("reason")
 	defer err.Free()
 	if err.Error() != "coded error: reason" {
