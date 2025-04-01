@@ -56,43 +56,44 @@ func NewOpts(text string, opts ErrorOpts) *Error {
 }
 
 // New creates a basic error with default options (stack trace enabled, updates last error).
-//
-// Example:
-//
-//	err := errors.New("operation failed")
-//	fmt.Println(err) // "operation failed"
 func New(text string) *Error {
-	return NewOpts(text, ErrorOpts{
-		SkipStack:  1, // Skip caller
-		UpdateLast: true,
-	})
+	err := errorPool.Get().(*Error)
+	err.Reset()
+	err.msg = text
+	if !DisableStack {
+		err.stack = captureStack(1)
+	}
+	if !DisableRegistry {
+		updateLastError(err)
+	}
+	return err
 }
 
 // Newf creates a formatted error with default options.
-//
-// Example:
-//
-//	err := errors.Newf("failed %s %d", "test", 42)
-//	fmt.Println(err) // "failed test 42"
 func Newf(format string, args ...interface{}) *Error {
-	return NewOpts(fmt.Sprintf(format, args...), ErrorOpts{
-		SkipStack:  1,
-		UpdateLast: true,
-	})
+	err := errorPool.Get().(*Error)
+	err.Reset()
+	err.msg = fmt.Sprintf(format, args...)
+	if !DisableStack {
+		err.stack = captureStack(1)
+	}
+	if !DisableRegistry {
+		updateLastError(err)
+	}
+	return err
 }
 
 // Named creates an error with a specific identifier and default options.
-//
-// Example:
-//
-//	err := errors.Named("db_error")
-//	fmt.Println(err) // "db_error"
 func Named(name string) *Error {
-	err := NewOpts("", ErrorOpts{
-		SkipStack:  1,
-		UpdateLast: true,
-	})
+	err := errorPool.Get().(*Error)
+	err.Reset()
 	err.name = name
+	if !DisableStack {
+		err.stack = captureStack(1)
+	}
+	if !DisableRegistry {
+		updateLastError(err)
+	}
 	return err
 }
 
@@ -213,7 +214,7 @@ func (e *Error) Trace() *Error {
 // WithCode associates an HTTP status code with the error, if it has a name.
 func (e *Error) WithCode(code int) *Error {
 	if e.name != "" {
-		registry.codes.Store(e.name, code) // Use sync.Map Store instead of assignment
+		registry.codes.Store(e.name, code)
 	}
 	return e
 }
