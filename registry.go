@@ -6,109 +6,18 @@ import (
 	"sync/atomic"
 )
 
-// errorRegistry holds registered errors
-type errorRegistry struct {
-	templates  map[string]string
-	funcs      map[string]func(...interface{}) *Error
-	codes      map[string]int
-	counts     map[string]*uint64
-	thresholds map[string]uint64
-	alerts     map[string]chan *Error
-	mu         sync.RWMutex
+// errorRegistry holds registered errors using sync.Map for concurrent access.
+var registry struct {
+	templates  sync.Map     // map[string]string
+	funcs      sync.Map     // map[string]func(...interface{}) *Error
+	codes      sync.Map     // map[string]int
+	counts     sync.Map     // map[string]*uint64
+	thresholds sync.Map     // map[string]uint64
+	alerts     sync.Map     // map[string]chan *Error
+	mu         sync.RWMutex // Retained for Monitor initialization
 }
 
-var registry = errorRegistry{
-	templates:  make(map[string]string),
-	funcs:      make(map[string]func(...interface{}) *Error),
-	codes:      make(map[string]int),
-	counts:     make(map[string]*uint64),
-	thresholds: make(map[string]uint64),
-	alerts:     make(map[string]chan *Error),
-}
-
-// newTemplateError creates error from template
-func newTemplateError(name, template string, args ...interface{}) *Error {
-	incrementCount(name)
-	err := &Error{
-		name:     name,
-		template: template,
-		msg:      fmt.Sprintf(template, args...),
-		stack:    captureStack(1),
-	}
-	updateLastError(err)
-	return err
-}
-
-// Define registers an error template
-func Define(name, template string) func(...interface{}) *Error {
-	registry.mu.Lock()
-	defer registry.mu.Unlock()
-	registry.templates[name] = template
-	initErrorCount(name)
-	return func(args ...interface{}) *Error {
-		return newTemplateError(name, template, args...)
-	}
-}
-
-// Callable registers a custom error function
-func Callable(name string, fn func(...interface{}) *Error) func(...interface{}) *Error {
-	registry.mu.Lock()
-	defer registry.mu.Unlock()
-	registry.funcs[name] = fn
-	initErrorCount(name)
-	return func(args ...interface{}) *Error {
-		incrementCount(name)
-		err := fn(args...)
-		updateLastError(err)
-		return err
-	}
-}
-
-// Coded registers template with HTTP code
-func Coded(name string, code int, template string) func(...interface{}) *Error {
-	registry.mu.Lock()
-	registry.codes[name] = code
-	registry.mu.Unlock()
-	return Define(name, template)
-}
-
-// Func creates function-bound error
-func Func(fn interface{}, msg string) *Error {
-	name := getFuncName(fn)
-	registry.mu.Lock()
-	if _, exists := registry.counts[name]; !exists {
-		registry.counts[name] = new(uint64)
-	}
-	registry.mu.Unlock()
-	incrementCount(name)
-	err := &Error{
-		name:  name,
-		msg:   fmt.Sprintf("%s: %s", name, msg),
-		stack: captureStack(1),
-	}
-	updateLastError(err)
-	return err
-}
-
-// SetThreshold configures alerting threshold for an error type
-func SetThreshold(name string, count uint64) {
-	registry.mu.Lock()
-	defer registry.mu.Unlock()
-	registry.thresholds[name] = count
-}
-
-// Monitor creates a channel for error alerts
-func Monitor(name string) <-chan *Error {
-	registry.mu.Lock()
-	if registry.alerts[name] == nil {
-		registry.alerts[name] = make(chan *Error, 10) // Buffered channel
-	}
-	ch := registry.alerts[name]
-	registry.mu.Unlock()
-	return ch
-}
-
-// lastErrors tracks the most recent instance of each named error
+// lastErrors tracks the most recent instance of each named error.
 var lastErrors struct {
 	m  map[string]*Error
 	mu sync.RWMutex
@@ -118,14 +27,105 @@ func init() {
 	lastErrors.m = make(map[string]*Error)
 }
 
-// GetLastError returns the most recent instance of a named error
+// newTemplateError creates an error from a template.
+func newTemplateError(name, template string, args ...interface{}) *Error {
+	if !DisableRegistry {
+		incrementCount(name)
+	}
+	err := errorPool.Get().(*Error)
+	err.Reset()
+	err.name = name
+	err.template = template
+	err.msg = fmt.Sprintf(template, args...)
+	if !DisableStack {
+		err.stack = captureStack(1)
+	}
+	if !DisableRegistry {
+		updateLastError(err)
+	}
+	return err
+}
+
+// Define registers an error template and returns a function to create errors.
+func Define(name, template string) func(...interface{}) *Error {
+	registry.templates.Store(name, template)
+	if !DisableRegistry {
+		initErrorCount(name)
+	}
+	return func(args ...interface{}) *Error {
+		return newTemplateError(name, template, args...)
+	}
+}
+
+// Callable registers a custom error function and returns it.
+func Callable(name string, fn func(...interface{}) *Error) func(...interface{}) *Error {
+	registry.funcs.Store(name, fn)
+	if !DisableRegistry {
+		initErrorCount(name)
+	}
+	return func(args ...interface{}) *Error {
+		if !DisableRegistry {
+			incrementCount(name)
+		}
+		err := fn(args...)
+		if !DisableRegistry {
+			updateLastError(err)
+		}
+		return err
+	}
+}
+
+// Coded registers a template with an HTTP code and returns a function to create errors.
+func Coded(name string, code int, template string) func(...interface{}) *Error {
+	registry.codes.Store(name, code)
+	return Define(name, template)
+}
+
+// Func creates a function-bound error.
+func Func(fn interface{}, msg string) *Error {
+	name := getFuncName(fn)
+	if !DisableRegistry {
+		initErrorCount(name)
+		incrementCount(name)
+	}
+	err := errorPool.Get().(*Error)
+	err.Reset()
+	err.name = name
+	err.msg = fmt.Sprintf("%s: %s", name, msg)
+	if !DisableStack {
+		err.stack = captureStack(1)
+	}
+	if !DisableRegistry {
+		updateLastError(err)
+	}
+	return err
+}
+
+// SetThreshold configures an alerting threshold for an error type.
+func SetThreshold(name string, count uint64) {
+	registry.thresholds.Store(name, count)
+}
+
+// Monitor creates a channel for error alerts, initializing it if needed.
+func Monitor(name string) <-chan *Error {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if ch, ok := registry.alerts.Load(name); ok {
+		return ch.(chan *Error)
+	}
+	ch := make(chan *Error, 10) // Buffered channel
+	registry.alerts.Store(name, ch)
+	return ch
+}
+
+// GetLastError returns the most recent instance of a named error.
 func GetLastError(name string) *Error {
 	lastErrors.mu.RLock()
 	defer lastErrors.mu.RUnlock()
 	return lastErrors.m[name]
 }
 
-// updateLastError stores the error as the most recent instance
+// updateLastError stores the error as the most recent instance.
 func updateLastError(e *Error) {
 	if e == nil || e.name == "" {
 		return
@@ -135,43 +135,39 @@ func updateLastError(e *Error) {
 	lastErrors.m[e.name] = e
 }
 
-// initErrorCount sets up atomic counter (called with lock held)
+// initErrorCount sets up an atomic counter for an error name.
 func initErrorCount(name string) {
-	if _, exists := registry.counts[name]; !exists {
-		registry.counts[name] = new(uint64)
+	if _, loaded := registry.counts.LoadOrStore(name, new(uint64)); !loaded {
+		// Counter was just stored, no further action needed
 	}
 }
 
-// incrementCount safely increments error counter
+// incrementCount safely increments the error counter.
 func incrementCount(name string) {
-	registry.mu.RLock()
-	defer registry.mu.RUnlock()
-	if counter, exists := registry.counts[name]; exists {
-		atomic.AddUint64(counter, 1)
+	if counter, ok := registry.counts.Load(name); ok {
+		atomic.AddUint64(counter.(*uint64), 1)
 		checkThreshold(name)
 	}
 }
 
-// checkThreshold triggers alerts if needed
+// checkThreshold triggers alerts if the count exceeds the threshold.
 func checkThreshold(name string) {
-	registry.mu.RLock()
-	defer registry.mu.RUnlock()
-	if threshold, ok := registry.thresholds[name]; ok {
-		if counter, exists := registry.counts[name]; exists {
-			if count := atomic.LoadUint64(counter); count >= threshold {
+	if threshold, ok := registry.thresholds.Load(name); ok {
+		if counter, ok := registry.counts.Load(name); ok {
+			if count := atomic.LoadUint64(counter.(*uint64)); count >= threshold.(uint64) {
 				triggerAlert(name)
 			}
 		}
 	}
 }
 
-// triggerAlert sends error to alert channel
+// triggerAlert sends the last error to the alert channel.
 func triggerAlert(name string) {
-	if ch, ok := registry.alerts[name]; ok {
+	if ch, ok := registry.alerts.Load(name); ok {
 		lastErr := GetLastError(name)
 		if lastErr != nil {
 			select {
-			case ch <- lastErr:
+			case ch.(chan *Error) <- lastErr:
 			default:
 				// Non-blocking send
 			}

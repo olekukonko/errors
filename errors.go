@@ -1,5 +1,6 @@
 // Package errors provides an enhanced error handling system with stack traces,
-// context, and monitoring capabilities.
+// context, and monitoring capabilities. It supports performance optimizations like
+// optional stack traces, lazy capture, object pooling, and configurable modes.
 package errors
 
 import (
@@ -7,8 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 	"sync/atomic"
 )
+
+// ErrorOpts configures options for error creation.
+type ErrorOpts struct {
+	SkipStack  int  // Number of stack frames to skip (0 disables stack capture)
+	UpdateLast bool // Whether to update the last error registry
+}
 
 // Error represents a rich error object with message, name, context, cause, and stack trace.
 type Error struct {
@@ -17,51 +25,74 @@ type Error struct {
 	template string                 // Message template
 	context  map[string]interface{} // Additional context
 	cause    error                  // Wrapped error
-	stack    []uintptr              // Stack trace
+	stack    []uintptr              // Stack trace (nil if not captured)
 }
 
-// New creates a basic error with the given text and captures a stack trace.
+// errorPool manages reusable Error instances for performance.
+var errorPool = sync.Pool{
+	New: func() interface{} {
+		return &Error{}
+	},
+}
+
+// Performance mode flags
+var (
+	DisableStack    = false // When true, disables stack traces by default
+	DisableRegistry = false // When true, disables counting and tracking
+)
+
+// NewOpts creates an error with custom options.
+func NewOpts(text string, opts ErrorOpts) *Error {
+	err := errorPool.Get().(*Error)
+	err.Reset()
+	err.msg = text
+	if !DisableStack && opts.SkipStack > 0 {
+		err.stack = captureStack(opts.SkipStack)
+	}
+	if !DisableRegistry && opts.UpdateLast {
+		updateLastError(err)
+	}
+	return err
+}
+
+// New creates a basic error with default options (stack trace enabled, updates last error).
 //
 // Example:
 //
 //	err := errors.New("operation failed")
 //	fmt.Println(err) // "operation failed"
 func New(text string) *Error {
-	err := &Error{
-		msg:   text,
-		stack: captureStack(1),
-	}
-	updateLastError(err)
-	return err
+	return NewOpts(text, ErrorOpts{
+		SkipStack:  1, // Skip caller
+		UpdateLast: true,
+	})
 }
 
-// Newf creates a formatted error using the provided format string and arguments.
+// Newf creates a formatted error with default options.
 //
 // Example:
 //
 //	err := errors.Newf("failed %s %d", "test", 42)
 //	fmt.Println(err) // "failed test 42"
 func Newf(format string, args ...interface{}) *Error {
-	err := &Error{
-		msg:   fmt.Sprintf(format, args...),
-		stack: captureStack(1),
-	}
-	updateLastError(err)
-	return err
+	return NewOpts(fmt.Sprintf(format, args...), ErrorOpts{
+		SkipStack:  1,
+		UpdateLast: true,
+	})
 }
 
-// Named creates an error with a specific identifier and captures a stack trace.
+// Named creates an error with a specific identifier and default options.
 //
 // Example:
 //
 //	err := errors.Named("db_error")
 //	fmt.Println(err) // "db_error"
 func Named(name string) *Error {
-	err := &Error{
-		name:  name,
-		stack: captureStack(1),
-	}
-	updateLastError(err)
+	err := NewOpts("", ErrorOpts{
+		SkipStack:  1,
+		UpdateLast: true,
+	})
+	err.name = name
 	return err
 }
 
@@ -89,7 +120,6 @@ func (e *Error) Is(target error) bool {
 			return true
 		}
 	} else if e.cause != nil {
-		// If target is not an *Error, delegate to stdlib Is for cause comparison
 		return errors.Is(e.cause, target)
 	}
 	if e.cause != nil {
@@ -126,8 +156,11 @@ func (e *Error) Unwrap() error {
 	return e.cause
 }
 
-// Stack returns a formatted stack trace as a slice of strings.
+// Stack returns a formatted stack trace, capturing it lazily if not already present.
 func (e *Error) Stack() []string {
+	if e.stack == nil && !DisableStack {
+		e.stack = captureStack(1)
+	}
 	if e.stack == nil {
 		return nil
 	}
@@ -169,7 +202,7 @@ func (e *Error) Context() map[string]interface{} {
 	return e.context
 }
 
-// Trace captures a stack trace if not already present.
+// Trace captures a stack trace if not already present, overriding DisableStack if called explicitly.
 func (e *Error) Trace() *Error {
 	if e.stack == nil {
 		e.stack = captureStack(1)
@@ -180,22 +213,18 @@ func (e *Error) Trace() *Error {
 // WithCode associates an HTTP status code with the error, if it has a name.
 func (e *Error) WithCode(code int) *Error {
 	if e.name != "" {
-		registry.mu.Lock()
-		registry.codes[e.name] = code
-		registry.mu.Unlock()
+		registry.codes.Store(e.name, code) // Use sync.Map Store instead of assignment
 	}
 	return e
 }
 
 // Count returns the number of occurrences of this error type, based on its name.
 func (e *Error) Count() uint64 {
-	if e.name == "" {
+	if e.name == "" || DisableRegistry {
 		return 0
 	}
-	registry.mu.RLock()
-	defer registry.mu.RUnlock()
-	if counter, ok := registry.counts[e.name]; ok {
-		return atomic.LoadUint64(counter)
+	if counter, ok := registry.counts.Load(e.name); ok {
+		return atomic.LoadUint64(counter.(*uint64))
 	}
 	return 0
 }
@@ -203,12 +232,10 @@ func (e *Error) Count() uint64 {
 // Code returns the HTTP status code associated with the error, defaulting to 500 if unnamed.
 func (e *Error) Code() int {
 	if e.name == "" {
-		return 500 // Default
+		return 500
 	}
-	registry.mu.RLock()
-	defer registry.mu.RUnlock()
-	if code, ok := registry.codes[e.name]; ok {
-		return code
+	if code, ok := registry.codes.Load(e.name); ok {
+		return code.(int)
 	}
 	return 500
 }
@@ -236,6 +263,22 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 		}
 	}
 	return json.Marshal(je)
+}
+
+// Reset clears all fields of the error, preparing it for reuse.
+func (e *Error) Reset() {
+	e.msg = ""
+	e.name = ""
+	e.template = ""
+	e.context = nil
+	e.cause = nil
+	e.stack = nil
+}
+
+// Free returns the error to the pool after resetting it.
+func (e *Error) Free() {
+	e.Reset()
+	errorPool.Put(e)
 }
 
 // Is provides compatibility with errors.Is, delegating to custom logic or stdlib as needed.
