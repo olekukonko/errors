@@ -75,6 +75,11 @@ func Coded(name string, code int, template string) func(...interface{}) *Error {
 // Func creates function-bound error
 func Func(fn interface{}, msg string) *Error {
 	name := getFuncName(fn)
+	registry.mu.Lock()
+	if _, exists := registry.counts[name]; !exists {
+		registry.counts[name] = new(uint64)
+	}
+	registry.mu.Unlock()
 	incrementCount(name)
 	err := &Error{
 		name:  name,

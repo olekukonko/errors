@@ -1,13 +1,16 @@
+// Package errors provides an enhanced error handling system with stack traces,
+// context, and monitoring capabilities.
 package errors
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync/atomic"
 )
 
-// Error represents a rich error object
+// Error represents a rich error object with message, name, context, cause, and stack trace.
 type Error struct {
 	msg      string                 // Formatted message
 	name     string                 // Error identifier
@@ -17,7 +20,12 @@ type Error struct {
 	stack    []uintptr              // Stack trace
 }
 
-// New creates a basic error
+// New creates a basic error with the given text and captures a stack trace.
+//
+// Example:
+//
+//	err := errors.New("operation failed")
+//	fmt.Println(err) // "operation failed"
 func New(text string) *Error {
 	err := &Error{
 		msg:   text,
@@ -27,7 +35,12 @@ func New(text string) *Error {
 	return err
 }
 
-// Newf creates a formatted error
+// Newf creates a formatted error using the provided format string and arguments.
+//
+// Example:
+//
+//	err := errors.Newf("failed %s %d", "test", 42)
+//	fmt.Println(err) // "failed test 42"
 func Newf(format string, args ...interface{}) *Error {
 	err := &Error{
 		msg:   fmt.Sprintf(format, args...),
@@ -37,7 +50,12 @@ func Newf(format string, args ...interface{}) *Error {
 	return err
 }
 
-// Named creates an identifiable error
+// Named creates an error with a specific identifier and captures a stack trace.
+//
+// Example:
+//
+//	err := errors.Named("db_error")
+//	fmt.Println(err) // "db_error"
 func Named(name string) *Error {
 	err := &Error{
 		name:  name,
@@ -47,7 +65,7 @@ func Named(name string) *Error {
 	return err
 }
 
-// Error implements error interface
+// Error returns the error message as a string, implementing the error interface.
 func (e *Error) Error() string {
 	if e.msg != "" {
 		return e.msg
@@ -61,13 +79,18 @@ func (e *Error) Error() string {
 	return "unknown error"
 }
 
-// Is implements errors.Is with custom name comparison
+// Is reports whether any error in e's chain matches target, using name comparison for *Error types.
 func (e *Error) Is(target error) bool {
 	if e == nil || target == nil {
 		return e == target
 	}
 	if te, ok := target.(*Error); ok {
-		return e.name == te.name && e.name != ""
+		if e.name != "" && e.name == te.name {
+			return true
+		}
+	} else if e.cause != nil {
+		// If target is not an *Error, delegate to stdlib Is for cause comparison
+		return errors.Is(e.cause, target)
 	}
 	if e.cause != nil {
 		return Is(e.cause, target)
@@ -75,20 +98,35 @@ func (e *Error) Is(target error) bool {
 	return false
 }
 
-// As implements errors.As
+// As finds the first error in e's chain that matches target, setting *target to that error value.
 func (e *Error) As(target interface{}) bool {
+	if e == nil {
+		return false
+	}
+	if targetPtr, ok := target.(**Error); ok {
+		if e.name != "" {
+			*targetPtr = e
+			return true
+		}
+		if e.cause != nil {
+			if ce, ok := e.cause.(*Error); ok {
+				*targetPtr = ce
+				return true
+			}
+		}
+	}
 	if e.cause != nil {
 		return As(e.cause, target)
 	}
 	return false
 }
 
-// Unwrap implements error unwrapping
+// Unwrap returns the underlying cause of the error, if any.
 func (e *Error) Unwrap() error {
 	return e.cause
 }
 
-// Stack returns formatted stack trace
+// Stack returns a formatted stack trace as a slice of strings.
 func (e *Error) Stack() []string {
 	if e.stack == nil {
 		return nil
@@ -105,7 +143,7 @@ func (e *Error) Stack() []string {
 	return trace
 }
 
-// With adds context to error
+// With adds a key-value pair to the error's context.
 func (e *Error) With(key string, value interface{}) *Error {
 	if e.context == nil {
 		e.context = make(map[string]interface{})
@@ -114,24 +152,24 @@ func (e *Error) With(key string, value interface{}) *Error {
 	return e
 }
 
-// Wrap adds causal error
+// Wrap sets the cause of the error, creating a chain of errors.
 func (e *Error) Wrap(cause error) *Error {
 	e.cause = cause
 	return e
 }
 
-// Msg sets error message
+// Msg updates the error message with a formatted string.
 func (e *Error) Msg(format string, args ...interface{}) *Error {
 	e.msg = fmt.Sprintf(format, args...)
 	return e
 }
 
-// Context returns the error's context map
+// Context returns the error's context map.
 func (e *Error) Context() map[string]interface{} {
 	return e.context
 }
 
-// Trace captures stack trace if not present
+// Trace captures a stack trace if not already present.
 func (e *Error) Trace() *Error {
 	if e.stack == nil {
 		e.stack = captureStack(1)
@@ -139,7 +177,7 @@ func (e *Error) Trace() *Error {
 	return e
 }
 
-// WithCode associates HTTP code
+// WithCode associates an HTTP status code with the error, if it has a name.
 func (e *Error) WithCode(code int) *Error {
 	if e.name != "" {
 		registry.mu.Lock()
@@ -149,7 +187,7 @@ func (e *Error) WithCode(code int) *Error {
 	return e
 }
 
-// Count returns the occurrence count of this error type
+// Count returns the number of occurrences of this error type, based on its name.
 func (e *Error) Count() uint64 {
 	if e.name == "" {
 		return 0
@@ -162,7 +200,7 @@ func (e *Error) Count() uint64 {
 	return 0
 }
 
-// Code returns the error code
+// Code returns the HTTP status code associated with the error, defaulting to 500 if unnamed.
 func (e *Error) Code() int {
 	if e.name == "" {
 		return 500 // Default
@@ -175,7 +213,7 @@ func (e *Error) Code() int {
 	return 500
 }
 
-// MarshalJSON implements json.Marshaler
+// MarshalJSON serializes the error to JSON, including name, message, context, cause, and stack.
 func (e *Error) MarshalJSON() ([]byte, error) {
 	type jsonError struct {
 		Name    string                 `json:"name,omitempty"`
@@ -200,18 +238,18 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 	return json.Marshal(je)
 }
 
-// Is provides errors.Is compatibility with custom logic
+// Is provides compatibility with errors.Is, delegating to custom logic or stdlib as needed.
 func Is(err, target error) bool {
 	if e, ok := err.(*Error); ok {
 		return e.Is(target)
 	}
-	return false
+	return errors.Is(err, target)
 }
 
-// As provides errors.As compatibility
+// As provides compatibility with errors.As, delegating to custom logic or stdlib as needed.
 func As(err error, target interface{}) bool {
 	if e, ok := err.(*Error); ok {
 		return e.As(target)
 	}
-	return false
+	return errors.As(err, target)
 }
