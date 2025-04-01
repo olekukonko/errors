@@ -1,236 +1,273 @@
-# Enhanced Error Handling for Go
+# Enhanced Error Handling for Go with Stack Traces, Monitoring, and More
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/olekukonko/errors.svg)](https://pkg.go.dev/github.com/olekukonko/errors)
 [![Go Report Card](https://goreportcard.com/badge/github.com/olekukonko/errors)](https://goreportcard.com/report/github.com/olekukonko/errors)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Benchmarks](https://img.shields.io/badge/benchmarks-included-success)](README.md#performance)
 
-A dead simple yet powerful drop-in replacement for Go's standard errors package with stack traces, error templates, monitoring capabilities, and performance optimizations.
+A dead simple, production-grade error handling library for Go with zero-cost abstractions, stack traces, automatic monitoring, and more.
 
 ## Features
 
-- **Stack Traces**: Automatic capture with configurable skipping
-- **Error Templates**: Predefined error formats with placeholders
-- **Error Monitoring**: Count occurrences and set alert thresholds
-- **Performance Optimized**:
-    - Object pooling
-    - Small context caching
-    - Lazy stack capture
-- **Context Support**: Attach key-value pairs to errors
-- **Error Chaining**: Wrap and unwrap error causes
-- **HTTP Status Codes**: Associate errors with HTTP codes
-- **JSON Support**: Full error serialization
-- **Compatibility**: Implements standard `error` interface and works with `errors.Is/As`
+✔ **Runtime Efficiency**  
+• Memory pooling (optional)  
+• Lazy stack trace collection  
+• Small context optimization (≤2 items)  
+• Lock-free configuration
+
+✔ **Debugging Capabilities**  
+• Full stack traces with filtering  
+• Error chaining/wrapping  
+• Structured context attachment  
+• JSON serialization
+
+✔ **Production Monitoring**  
+• Error occurrence counting  
+• Threshold-based alerts  
+• Categorized metrics  
+• Template-based definitions
+
+✔ **Advanced Patterns**  
+• Automatic retry mechanism  
+• Multi-error aggregation  
+• HTTP status code support  
+• Callback triggers
 
 ## Installation
 
 ```bash
-go get github.com/olekukonko/errors
+go get github.com/olekukonko/errors@latest
 ```
 
 ## Quick Start
 
-### Basic Usage
+### Basic Error Creation
 
 ```go
-package main
+// Simple error with automatic stack trace
+err := errors.New("database connection failed")
+fmt.Println(errors.Stack(err)) // Detailed stack trace
 
-import (
-	"fmt"
-	"github.com/olekukonko/errors"
-)
+// Formatted error
+err = errors.Newf("invalid value %q at position %d", "nil", 3)
 
-func main() {
-	// Simple error with stack trace
-	err := errors.New("something went wrong")
-	fmt.Println(err)
-	fmt.Println(err.Stack())
+// Named error type
+err = errors.Named("AuthError")
 
-	// Formatted error
-	err = errors.Newf("invalid value: %d", 42)
-	
-	// Named error
-	err = errors.Named("ValidationError")
-	
-	// Fast error (no stack trace)
-	err = errors.FastNew("critical path error")
-}
+// High-performance error (no stack trace)
+err = errors.Fast("critical path failure") 
 ```
 
-##### or 
+### Contextual Errors
 
 ```go
-
-package main
-
-import (
-    "fmt"
-    "github.com/olekukonko/errors"
-)
-
-var ErrNetwork = errors.Define("ErrNetwork", "network error: %s")
-
-func main() {
-    err := riskyOperation()
-    if errors.IsError(err) {
-        fmt.Printf("%s\nCount: %d\n", err, errors.Count(err))
-        fmt.Println("Stack:", errors.Stack(err))
-    } else {
-        fmt.Println("Standard error:", err)
-    }
-}
-
-func riskyOperation() error {
-    return ErrNetwork("connection timeout").
-        With("endpoint", "api.example.com").
-        With("timeout", 30)
-}
-```
-
-
-```go
-
-err := errors.New("example").With("key", "value")
-
-if errors.IsEnhanced(err) {
-    fmt.Println("Stack:", errors.Stack(err))
-    fmt.Println("Context:", errors.Context(err))
-    fmt.Println("Name:", errors.Name(err))
-    fmt.Println("Count:", errors.Count(err))
-    fmt.Println("HTTP Code:", errors.Code(err))
-}
-```
-### Error Templates
-
-```go
-// Define an error template
-var ErrDatabase = errors.Define("ErrDatabase", "database error: %s")
-
-// Use the template
-func queryDB() error {
-	return ErrDatabase("connection timeout")
-}
-```
-
-### Error Context
-
-```go
+// Add structured context
 err := errors.New("file operation failed").
-	With("filename", "data.json").
-	With("size", 1024)
-	
-// Get context later
-ctx := err.(*errors.Error).Context()
+    With("filename", "data.json").
+    With("attempt", 3).
+    With("retryable", true)
+
+// Extract context
+if ctx := errors.Context(err); ctx["retryable"] == true {
+    // Retry logic
+}
+```
+
+### Error Management
+
+```go
+// Configure global settings
+errors.Configure(errors.Config{
+    StackDepth:   64,      // Max stack frames
+    DisableStack: false,   // Enable traces
+    FilterInternal: true,  // Hide internal frames
+})
+
+// Template with status code
+var ErrNotFound = errors.Coded("NotFound", 404, "%s not found")
+err := ErrNotFound("user profile")
+fmt.Println(err.Code()) // 404
+```
+
+## Core Concepts
+
+### Stack Traces
+
+```go
+err := errors.New("example").Trace()
+
+// Detailed trace
+for _, frame := range err.Stack() {
+    fmt.Printf("%s\n\t%s:%d\n", frame.Function, frame.File, frame.Line)
+}
+
+// Lightweight trace
+fmt.Println(err.FastStack()) // ["file.go:123", "main.go:42"]
+```
+
+### Error Pooling (Automatic)
+
+```go
+// Enabled by default in Go 1.24+
+err := errors.New("temporary")
+// Automatically returns to pool when unreachable
+
+// Manual control (optional)
+err.Free() // Explicit return to pool
 ```
 
 ### Error Monitoring
 
 ```go
-// Set threshold for alerts
-errors.SetThreshold("ErrDatabase", 10) // Alert after 10 occurrences
+// Track error occurrences
+monitor := errors.NewMonitor("DBError", 5) // Threshold=5
+defer monitor.Close()
 
-// Monitor errors
-monitor := errors.Monitor("ErrDatabase")
 go func() {
-	for err := range monitor {
-		fmt.Printf("ALERT: Too many database errors! Latest: %v\n", err)
-	}
+    for alert := range monitor.Alerts() {
+        fmt.Printf("ALERT: %s occurred %d times\n", 
+            alert.Name, alert.Count)
+    }
 }()
 
-// Trigger threshold
-for i := 0; i < 15; i++ {
-	_ = ErrDatabase("connection failed")
+// Simulate errors
+for i := 0; i < 10; i++ {
+    errors.Named("DBError").Increment()
 }
 ```
 
-### HTTP Error Codes
+## Advanced Usage
+
+### Retry Mechanism
 
 ```go
-// Create error with HTTP status code
-var ErrNotFound = errors.Coded("ErrNotFound", 404, "%s not found")
+retry := errors.NewRetry(
+    errors.WithBackoff(100*time.Millisecond),
+    errors.WithJitter(50*time.Millisecond),
+)
 
-// Get the code later
-err := ErrNotFound("user profile")
-code := err.(*errors.Error).Code() // Returns 404
-```
-
-## Performance Tuning
-
-Configure global settings for performance:
-
-```go
-// Disable stack traces (faster)
-errors.DisableStack = true
-
-// Disable error registry (faster, no counting/monitoring)
-errors.DisableRegistry = true
-
-// Disable object pooling (for debugging)
-errors.DisablePooling = true
-```
-
-## Benchmarks
-
-The package is highly optimized. Some benchmark results:
-
-| Operation                | Time/Op | Allocs/Op |
-|--------------------------|---------|-----------|
-| New (with stack)         | 221ns   | 1         |
-| New (no stack)           | 11.2ns  | 0         |
-| FastNew                  | 9.99ns  | 0         |
-| WithContext              | 14.8ns  | 0         |
-| Error.Is                 | 5.53ns  | 0         |
-| Error.Count              | 9.75ns  | 0         |
-
-## Advanced Features
-
-### Custom Error Functions
-
-```go
-var ErrComplex = errors.Callable("ErrComplex", func(args ...interface{}) *errors.Error {
-	// Custom error creation logic
-	return errors.Newf("complex error: %v", args)
+err := retry.Execute(func() error {
+    return callFlakyService()
 })
 
-// Usage
-err := ErrComplex("data", 42, true)
+if errors.IsRetryable(err) {
+    // Handle retry exhaustion
+}
 ```
 
-### JSON Serialization
+### Multi-Error Aggregation
 
 ```go
-err := errors.New("example").With("key", "value")
-jsonData, _ := json.Marshal(err)
-// {"message":"example","context":{"key":"value"},"stack":[...]}
+batch := errors.NewBatch()
+
+batch.Add(validateInput(input))
+batch.Add(checkPermissions(user)))
+batch.Add(updateDatabase(record)))
+
+if batch.Failed() {
+    fmt.Printf("Failed with %d errors:\n%v", 
+        batch.Count(), batch)
+}
 ```
 
-### Error Pooling
-
-Errors are pooled by default. Remember to Free() them when done:
+### HTTP Error Handling
 
 ```go
-err := errors.New("temporary")
-defer err.Free() // Returns to pool
+func getUserHandler(w http.ResponseWriter, r *http.Request) {
+    user, err := fetchUser(r.URL.Query().Get("id"))
+    if err != nil {
+        err := errors.Wrap(err, "getUserHandler").
+            With("path", r.URL.Path).
+            WithCode(404)
+            
+        w.WriteHeader(err.Code())
+        json.NewEncoder(w).Encode(err)
+        return
+    }
+    // ...
+}
 ```
 
-## Predefined Errors
+## Performance Optimization
 
-Common HTTP errors are predefined:
+### Configuration Tuning
 
 ```go
-errors.ErrNotFound        // 404
-errors.ErrPermission      // 403
-errors.ErrInvalidArgument // 400
-errors.ErrAuth            // 401
+// For high-throughput services
+errors.Configure(errors.Config{
+    DisableStack:   true,  // Skip traces
+    DisablePooling: false, // Enable pooling
+    ContextSize:    1,     // Optimize for 1-2 context items
+})
 ```
 
-## Why Use This Package?
+### Memory Efficiency
 
-- **More informative errors** with stack traces and context
-- **Better debugging** with rich error information
-- **Production monitoring** with error counting and alerts
-- **High performance** through careful optimization
-- **Drop-in replacement** works with standard error handling
+```go
+type contextItem struct {
+    key   string
+    value interface{}
+}
+
+// Memory layout (optimized)
+type Error struct {
+    // Hot path (frequently accessed)
+    msg      string
+    stack    []uintptr
+    
+    // Cold path
+    smallContext [2]contextItem // No allocation for ≤2 items
+    // ...
+}
+```
+
+## Migration Guide
+
+### From Standard Errors
+
+1. Replace `fmt.Errorf()` with `errors.Newf()`
+2. Convert `errors.New()` to `errors.New()` as normal
+3. Add context with `.With()` instead of string formatting
+4. Use `errors.Is()`/`errors.As()` as normal
+
+### From pkg/errors
+
+1. Replace `Wrap()` with `errors.Wrapf()`
+2. Use `errors.Stack()` instead of `StackTrace()`
+3. Enable pooling for better performance
+4. Leverage structured context instead of error messages
+
+## FAQ
+
+**Q: When should I call Free()?**  
+A: Only when you need deterministic memory reclamation. The pool automatically handles cleanup in Go 1.24+.
+
+**Q: How to disable stack traces?**
+```go
+errors.Configure(errors.Config{DisableStack: true})
+```
+
+**Q: Can I use this with middleware?**
+```go
+func ErrorMiddleware(next http.Handler) http.Handler {
+return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+defer func() {
+if err := recover(); err != nil {
+errors.New("panic").With("path", r.URL.Path)
+// ...
+}
+}()
+next.ServeHTTP(w, r)
+})
+}
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Submit a pull request
 
 ## License
 
-MIT. See LICENSE file for details.
+MIT License - See [LICENSE](LICENSE) for details.

@@ -23,9 +23,9 @@ func NewMonitor(name string) *Monitor {
 	return &Monitor{name: name, ch: ch}
 }
 
-// Chan returns the channel for receiving error alerts.
+// Alerts returns the channel for receiving error alerts.
 // Alerts are sent when the error count exceeds the threshold set by SetThreshold.
-func (m *Monitor) Chan() <-chan *errors.Error {
+func (m *Monitor) Alerts() <-chan *errors.Error {
 	return m.ch
 }
 
