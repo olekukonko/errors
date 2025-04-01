@@ -30,6 +30,7 @@ type Config struct {
 	DisableStack   bool // If true, disables stack trace capture.
 	DisablePooling bool // If true, disables object pooling for errors.
 	FilterInternal bool // If true, filters internal package frames from stack traces.
+	AutoFree       bool
 }
 
 // cachedConfig holds the current configuration, updated only on Configure().
@@ -39,6 +40,7 @@ type cachedConfig struct {
 	disableStack   bool
 	disablePooling bool
 	filterInternal bool
+	autofree       bool // If true, filters internal package frames from stack traces.
 }
 
 var (
@@ -55,6 +57,7 @@ func init() {
 		disableStack:   false,
 		disablePooling: false,
 		filterInternal: true,
+		autofree:       true,
 	}
 	WarmPool(100) // Pre-warm pool with 100 errors on initialization.
 }
@@ -70,6 +73,7 @@ func Configure(cfg Config) {
 		disableStack:   cfg.DisableStack,
 		disablePooling: cfg.DisablePooling,
 		filterInternal: cfg.FilterInternal,
+		autofree:       cfg.AutoFree,
 	}
 	configMu.Unlock()
 }
@@ -80,19 +84,28 @@ type contextItem struct {
 }
 
 // Error represents a custom error with enhanced features like context, stack traces, and wrapping.
+// Error is a custom error type with enhanced features like stack tracing, context, and error chaining.
+// It is optimized for performance by separating fields into hot, warm, and cold paths based on usage frequency.
 type Error struct {
-	msg          string
-	name         string
-	template     string
-	context      map[string]interface{}
-	cause        error
-	stack        []uintptr
-	smallContext [2]contextItem // Fixed-size array for up to 2 context items.
-	smallCount   int
-	callback     func()
-	code         int
-	category     string
-	count        uint64
+	// Hot Path (frequently accessed in Error() and Stack() methods)
+	stack []uintptr // Captured stack trace (approx. 24 bytes) used for debugging and tracing.
+	msg   string    // The error message (approx. 16 bytes), primary field for error description.
+	name  string    // Name of the error (approx. 16 bytes), can be used for error classification.
+
+	// Warm Path (frequently accessed, but not as critical as hot fields)
+	template string // Formatted template for the error message (approx. 16 bytes).
+	category string // Category string for classifying the error (approx. 16 bytes).
+	code     int    // Numeric code (e.g., HTTP status) for the error (approx. 8 bytes).
+	count    uint64 // A counter for tracking occurrences (approx. 8 bytes).
+
+	// Cold Path (rarely accessed fields, used for additional context or chaining)
+	context      map[string]interface{} // Additional context data (map pointer, approx. 8 bytes).
+	cause        error                  // Wrapped underlying error (approx. 16 bytes).
+	callback     func()                 // Callback function to execute on error retrieval (approx. 8 bytes).
+	smallContext [2]contextItem         // Fixed-size array for up to 2 key/value context pairs (size depends on contextItem).
+	smallCount   int                    // Number of items stored in smallContext (approx. 8 bytes).
+	pooled       bool                   // Flag indicating whether the error is pooled for reuse (1 byte).
+	_            [7]byte                // Padding to align the struct correctly.
 }
 
 // WarmPool pre-populates the error pool with a specified number of instances.
@@ -500,9 +513,11 @@ func (e *Error) Reset() {
 // Free resets the error and returns it to the pool, if pooling is enabled.
 // Does nothing beyond reset if pooling is disabled.
 func (e *Error) Free() {
-	if !currentConfig.disablePooling {
+	if e.pooled && !currentConfig.disablePooling {
 		e.Reset()
 		errorPool.Put(e)
+		// For Go 1.24+, the cleanup handler will handle it automatically
+		// For older versions, explicit Free() is needed
 	}
 }
 

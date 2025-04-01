@@ -6,26 +6,25 @@ package errors
 import (
 	"runtime"
 	"sync"
-	"sync/atomic"
 )
 
 var (
-	errorPool   sync.Pool
-	cleanupDone uint32 // Atomic flag to track cleanup registration
+	errorPool sync.Pool
 )
 
 func init() {
 	errorPool = sync.Pool{
 		New: func() interface{} {
-			err := &Error{}
-			// Register cleanup with proper signature
-			runtime.AddCleanup(err, func(_ *struct{}) {
-				if !currentConfig.disablePooling {
-					err.Reset()
-					errorPool.Put(err)
-				}
-			}, nil) // Using nil as arg to avoid ptr==arg issue
-			return err
+			e := &Error{pooled: true}
+			if currentConfig.autofree {
+				runtime.AddCleanup(e, func(_ *struct{}) {
+					if e.pooled && !currentConfig.disablePooling {
+						e.Reset()
+						errorPool.Put(e)
+					}
+				}, nil)
+			}
+			return e
 		},
 	}
 
@@ -39,27 +38,13 @@ func init() {
 	WarmPool(100)
 }
 
-// getPooledError retrieves an error instance with proper cleanup
 func getPooledError() *Error {
 	if currentConfig.disablePooling {
-		return &Error{}
+		return &Error{pooled: false}
 	}
 
-	var err *Error
-	if pooled := errorPool.Get(); pooled != nil {
-		atomic.AddUint64(&poolHits, 1)
-		err = pooled.(*Error)
-		err.Reset()
-	} else {
-		atomic.AddUint64(&poolMisses, 1)
-		err = &Error{}
-		// Register cleanup with dummy argument
-		runtime.AddCleanup(err, func(_ *struct{}) {
-			if !currentConfig.disablePooling {
-				err.Reset()
-				errorPool.Put(err)
-			}
-		}, nil)
-	}
-	return err
+	e := errorPool.Get().(*Error)
+	e.pooled = true // Mark as from pool
+	e.Reset()
+	return e
 }

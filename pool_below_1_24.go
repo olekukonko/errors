@@ -4,38 +4,48 @@
 package errors
 
 import (
+	"runtime"
 	"sync"
-	"sync/atomic"
 )
 
-var errorPool = sync.Pool{
-	New: func() interface{} {
-		return &Error{}
-	},
-}
+var (
+	errorPool sync.Pool
+)
 
 func init() {
+	errorPool = sync.Pool{
+		New: func() interface{} {
+			e := &Error{pooled: true}
+			if currentConfig.autofree {
+				runtime.SetFinalizer(e, func(e *Error) {
+					if e.pooled && !currentConfig.disablePooling {
+						e.Reset()
+						errorPool.Put(e)
+					}
+				})
+			}
+			return e
+		},
+	}
+
 	currentConfig = cachedConfig{
 		stackDepth:     32,
 		contextSize:    2,
 		disableStack:   false,
-		disablePooling: true, // Disabled by default for Go < 1.24
+		disablePooling: true,
 		filterInternal: true,
 	}
 	WarmPool(100)
 }
 
-// getPooledError retrieves an error instance without cleanup for Go < 1.24
 func getPooledError() *Error {
 	if currentConfig.disablePooling {
-		return &Error{}
+		return &Error{pooled: false}
 	}
-	if pooled := errorPool.Get(); pooled != nil {
-		atomic.AddUint64(&poolHits, 1)
-		err := pooled.(*Error)
-		err.Reset()
-		return err
-	}
-	atomic.AddUint64(&poolMisses, 1)
-	return &Error{}
+
+	e := errorPool.Get().(*Error)
+	e.pooled = true
+	e.Reset()
+	runtime.SetFinalizer(e, nil) // Remove temporary finalizer
+	return e
 }
