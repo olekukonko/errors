@@ -90,8 +90,8 @@ func TestErrorMethods(t *testing.T) {
 
 	// Test WithCategory
 	err = err.WithCategory("test_category")
-	if GetCategory(err) != "test_category" {
-		t.Errorf("WithCategory() failed, category = %v, want %v", GetCategory(err), "test_category")
+	if Category(err) != "test_category" {
+		t.Errorf("WithCategory() failed, category = %v, want %v", Category(err), "test_category")
 	}
 
 	// Test Increment

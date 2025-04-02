@@ -63,9 +63,9 @@ func Find(err error, pred func(error) bool) error {
 	return nil
 }
 
-// GetCategory returns the category of an error, if it is an *Error.
+// Category returns the category of an error, if it is an *Error.
 // Returns an empty string for non-*Error types.
-func GetCategory(err error) string {
+func Category(err error) string {
 	if e, ok := err.(*Error); ok {
 		return e.category
 	}

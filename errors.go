@@ -135,6 +135,12 @@ func (e *Error) Callback(fn func()) *Error {
 	return e
 }
 
+// Category sets a category for the error and returns the error.
+// Useful for classifying errors (e.g., "network", "validation").
+func (e *Error) Category() string {
+	return e.category
+}
+
 // Code returns the error's status code, if set.
 // Returns 0 if no code is defined.
 func (e *Error) Code() int {
