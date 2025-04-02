@@ -277,7 +277,7 @@ func main() {
     multi.Add(checkPermissions("user"))
     multi.Add(updateDatabase("record"))
 
-    if multi.HasError() {
+    if multi.Has() {
         fmt.Printf("Failed with %d errors:\n%v\n", 
             len(multi.Errors()), multi)
     }

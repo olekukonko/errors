@@ -183,3 +183,18 @@ func BenchmarkSpecial_Format(b *testing.B) {
 		err.Free()
 	}
 }
+
+func BenchmarkPoolGetPut(b *testing.B) {
+	e := &Error{}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		errorPool.Put(e)
+		e = errorPool.Get()
+	}
+}
+
+func BenchmarkStackAlloc(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_ = make([]uintptr, 0, currentConfig.stackDepth)
+	}
+}

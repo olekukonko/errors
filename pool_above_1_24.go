@@ -3,52 +3,18 @@
 
 package errors
 
-import (
-	"runtime"
-	"sync"
-)
+import "runtime"
 
-var (
-	errorPool sync.Pool
-)
-
-func init() {
-	errorPool = sync.Pool{
-		New: func() interface{} {
-			e := &Error{
-				smallContext: [contextSize]contextItem{},
-				stack:        make([]uintptr, 0, currentConfig.stackDepth),
+func (ep *ErrorPool) setupCleanup(e *Error) {
+	if currentConfig.autoFree {
+		runtime.AddCleanup(e, func(_ *struct{}) {
+			if !currentConfig.disablePooling {
+				ep.Put(e)
 			}
-			if currentConfig.autofree {
-				runtime.AddCleanup(e, func(_ *struct{}) {
-					if !currentConfig.disablePooling {
-						e.Reset()
-						// Keep the pre-allocated memory
-						e.stack = e.stack[:0]
-						errorPool.Put(e)
-					}
-				}, nil)
-			}
-			return e
-		},
+		}, nil)
 	}
-
-	currentConfig = cachedConfig{
-		stackDepth:     stackDepth,
-		contextSize:    contextSize,
-		disablePooling: false,
-		filterInternal: true,
-		autofree:       true,
-	}
-	WarmPool(warmUpSize)
 }
 
-func getPooledError() *Error {
-	if currentConfig.disablePooling {
-		return &Error{}
-	}
-
-	e := errorPool.Get().(*Error)
-	e.Reset()
-	return e
+func (ep *ErrorPool) clearCleanup(e *Error) {
+	// No-op for Go 1.24+
 }

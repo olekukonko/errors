@@ -7,15 +7,14 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
-	"sync"
 )
 
 // Stack pool and capture functions for managing stack traces.
-var stackPool = sync.Pool{
-	New: func() interface{} {
-		return make([]uintptr, 0, currentConfig.stackDepth)
-	},
-}
+//var stackPool = sync.Pool{
+//	New: func() interface{} {
+//		return make([]uintptr, 0, currentConfig.stackDepth)
+//	},
+//}
 
 // WarmStackPool pre-populates the stack pool with a specified number of slices.
 // Reduces allocation overhead for stack traces; no effect if pooling is disabled.
@@ -57,6 +56,18 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// Helper function to detect sql.Null types
+func sqlNull(v interface{}) bool {
+	if v == nil {
+		return false
+	}
+
+	if null, ok := v.(interface{ Valid() bool }); ok {
+		return null.Valid()
+	}
+	return false
 }
 
 // getFuncName extracts the function name from an interface, typically a function or method.

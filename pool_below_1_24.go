@@ -3,52 +3,16 @@
 
 package errors
 
-import (
-	"runtime"
-	"sync"
-)
-
-var (
-	errorPool sync.Pool
-)
-
-func init() {
-	errorPool = sync.Pool{
-		New: func() interface{} {
-			e := &Error{
-				smallContext: [contextSize]contextItem{},
-				stack:        make([]uintptr, 0, currentConfig.stackDepth),
+func (ep *ErrorPool) setupCleanup(e *Error) {
+	if currentConfig.autoFree {
+		runtime.SetFinalizer(e, func(e *Error) {
+			if !currentConfig.disablePooling {
+				ep.Put(e)
 			}
-			if currentConfig.autofree {
-				runtime.SetFinalizer(e, func(e *Error) {
-					if !currentConfig.disablePooling {
-						e.Reset()
-						// Keep pre-allocated memory
-						e.stack = e.stack[:0]
-						errorPool.Put(e)
-					}
-				})
-			}
-			return e
-		},
+		})
 	}
-
-	currentConfig = cachedConfig{
-		stackDepth:     stackDepth,
-		contextSize:    contextSize,
-		disablePooling: true,
-		filterInternal: true,
-		autofree:       false,
-	}
-	WarmPool(warmUpSize)
 }
 
-func getPooledError() *Error {
-	if currentConfig.disablePooling {
-		return &Error{}
-	}
-	e := errorPool.Get().(*Error)
-	e.Reset()
-	runtime.SetFinalizer(e, nil) // Remove temporary finalizer
-	return e
+func (ep *ErrorPool) clearCleanup(e *Error) {
+	runtime.SetFinalizer(e, nil)
 }

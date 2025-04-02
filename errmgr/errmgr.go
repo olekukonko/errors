@@ -247,6 +247,6 @@ func SetThreshold(name string, threshold uint64) {
 
 // Err creates a new instance of a predefined static error, ensuring immutability of originals.
 // Use this for static errors; templated errors should be called directly with arguments.
-func Err(err *errors.Error) *errors.Error {
+func Copy(err *errors.Error) *errors.Error {
 	return err.Copy()
 }

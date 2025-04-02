@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -44,12 +45,18 @@ type cachedConfig struct {
 	contextSize    int
 	disablePooling bool
 	filterInternal bool
-	autofree       bool // If true, filters internal package frames from stack traces.
+	autoFree       bool // If true, filters internal package frames from stack traces.
 }
 
 var (
 	currentConfig cachedConfig
 	configMu      sync.RWMutex
+	errorPool     = NewErrorPool() // Replace sync.Pool with ErrorPool
+	stackPool     = sync.Pool{
+		New: func() interface{} {
+			return make([]uintptr, currentConfig.stackDepth)
+		},
+	}
 )
 
 func init() {
@@ -58,8 +65,9 @@ func init() {
 		contextSize:    contextSize,
 		disablePooling: false,
 		filterInternal: true,
-		autofree:       true,
+		autoFree:       true,
 	}
+
 	WarmPool(warmUpSize) // Pre-warm pool with 100 errors on initialization.
 }
 
@@ -84,8 +92,8 @@ func Configure(cfg Config) {
 	if currentConfig.filterInternal != cfg.FilterInternal {
 		currentConfig.filterInternal = cfg.FilterInternal
 	}
-	if currentConfig.autofree != cfg.AutoFree {
-		currentConfig.autofree = cfg.AutoFree
+	if currentConfig.autoFree != cfg.AutoFree {
+		currentConfig.autoFree = cfg.AutoFree
 	}
 }
 
@@ -132,11 +140,12 @@ func WarmPool(count int) {
 		return
 	}
 	for i := 0; i < count; i++ {
-		errorPool.Put(&Error{
+		e := &Error{
 			smallContext: [contextSize]contextItem{},
-			stack:        nil, // Start with nil instead of empty slice
-		})
-		stackPool.Put(make([]uintptr, currentConfig.stackDepth))
+			stack:        nil,
+		}
+		errorPool.Put(e)
+		stackPool.Put(make([]uintptr, 0, currentConfig.stackDepth))
 	}
 }
 
@@ -145,20 +154,16 @@ func newError() *Error {
 	if currentConfig.disablePooling {
 		return &Error{
 			smallContext: [contextSize]contextItem{},
-			stack:        nil, // Explicitly set to nil
+			stack:        nil,
 		}
 	}
-	e := errorPool.Get().(*Error)
-	e.Reset()
-	e.stack = nil // Ensure stack is nil after reset
-	return e
+	return errorPool.Get()
 }
 
 // Empty creates a new empty error with an optional stack trace.
 // It is useful as a base for building errors incrementally.
 func Empty() *Error {
-	e := newError()
-	return e
+	return newError()
 }
 
 // New creates a fast, lightweight error without stack tracing.
@@ -250,8 +255,48 @@ func (e *Error) Name() string {
 
 // HasError checks if the error contains meaningful content.
 // Returns true if msg, template, name, or cause is non-empty/nil.
-func (e *Error) HasError() bool {
+func (e *Error) Has() bool {
 	return e != nil && (e.msg != "" || e.template != "" || e.name != "" || e.cause != nil)
+}
+
+// Null checks if an error is nil/empty across various error types
+func (e *Error) Null() bool {
+	if e == nil {
+		return true
+	}
+
+	// Check basic error fields first (fast path)
+	if e.Has() {
+		return false
+	}
+
+	// Check for sql.Null types in context (if any)
+	if e.smallCount > 0 {
+		for i := 0; i < int(e.smallCount); i++ {
+			if sqlNull(e.smallContext[i].value) {
+				return false
+			}
+		}
+	}
+	if e.context != nil {
+		for _, v := range e.context {
+			if sqlNull(v) {
+				return false
+			}
+		}
+	}
+
+	// Check if this error wraps a sql.Null type
+	if e.cause != nil {
+		if sqlNull(e.cause) {
+			return false
+		}
+		if _, ok := e.cause.(interface{ Valid() bool }); ok {
+			return false
+		}
+	}
+
+	return true
 }
 
 // Is checks if the error matches a target error by name or wrapped cause.
@@ -402,9 +447,22 @@ func (e *Error) With(key string, value interface{}) *Error {
 }
 
 // WithStack captures the stack trace at call time and returns the error
+//
+//	func (e *Error) WithStack() *Error {
+//		if e.stack == nil {
+//			e.stack = captureStack(1)
+//		}
+//		return e
+//	}
 func (e *Error) WithStack() *Error {
 	if e.stack == nil {
-		e.stack = captureStack(1)
+		if currentConfig.stackDepth > 0 {
+			e.stack = stackPool.Get().([]uintptr)
+			e.stack = e.stack[:0]
+			// +1 skips runtime.Callers itself
+			n := runtime.Callers(2, e.stack[:cap(e.stack)])
+			e.stack = e.stack[:n]
+		}
 	}
 	return e
 }
@@ -452,7 +510,9 @@ func (e *Error) Trace() *Error {
 // Copy creates a deep copy of the error, preserving all fields except stack.
 // The new error does not capture a new stack trace unless explicitly added.
 func (e *Error) Copy() *Error {
-	newErr := getPooledError()
+	newErr := newError() // Use our improved newError() instead of getPooledError()
+
+	// Copy all fields
 	newErr.msg = e.msg
 	newErr.name = e.name
 	newErr.template = e.template
@@ -460,11 +520,30 @@ func (e *Error) Copy() *Error {
 	newErr.code = e.code
 	newErr.category = e.category
 	newErr.count = e.count
-	if e.smallCount > 0 || e.context != nil {
-		for k, v := range e.Context() {
-			newErr.With(k, v)
+
+	// Handle context copy efficiently
+	if e.smallCount > 0 {
+		// Fast path: copy smallContext directly
+		newErr.smallCount = e.smallCount
+		for i := int32(0); i < e.smallCount; i++ {
+			newErr.smallContext[i] = e.smallContext[i]
+		}
+	} else if e.context != nil {
+		// Slow path: copy map if exists
+		newErr.context = make(map[string]interface{}, len(e.context))
+		for k, v := range e.context {
+			newErr.context[k] = v
 		}
 	}
+
+	// Handle stack trace copy
+	if e.stack != nil && len(e.stack) > 0 {
+		if newErr.stack == nil {
+			newErr.stack = stackPool.Get().([]uintptr)
+		}
+		newErr.stack = append(newErr.stack[:0], e.stack...)
+	}
+
 	return newErr
 }
 
@@ -594,12 +673,17 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 // Reset clears all fields of the error, preparing it for reuse.
 // Frees the stack to the pool if present.
 func (e *Error) Reset() {
-	// Clear fields but preserve allocations
+	// Clear all fields
 	e.msg = ""
 	e.name = ""
 	e.template = ""
+	e.category = ""
+	e.code = 0
+	e.count = 0
+	e.cause = nil
+	e.callback = nil
 
-	// Clear context but keep allocated map if exists
+	// Clear context
 	if e.context != nil {
 		for k := range e.context {
 			delete(e.context, k)
@@ -607,28 +691,29 @@ func (e *Error) Reset() {
 	}
 	e.smallCount = 0
 
-	// Preserve stack slice capacity
+	// Keep stack slice allocated but empty
 	if e.stack != nil {
 		e.stack = e.stack[:0]
 	}
-
-	// Clear other fields
-	e.cause = nil
-	e.callback = nil
-	e.code = 0
-	e.category = ""
-	e.count = 0
 }
 
 // Free resets the error and returns it to the pool, if pooling is enabled.
 // Does nothing beyond reset if pooling is disabled.
 func (e *Error) Free() {
-	if !currentConfig.disablePooling {
-		e.Reset()
-		errorPool.Put(e)
-		// For Go 1.24+, the cleanup handler will handle it automatically
-		// For older versions, explicit Free() is needed
+	if currentConfig.disablePooling {
+		return
 	}
+
+	e.Reset()
+
+	// Return stack to stackPool if it exists
+	if e.stack != nil {
+		stackPool.Put(e.stack[:cap(e.stack)]) // Return full capacity slice
+		e.stack = nil
+	}
+
+	// Return error to ErrorPool
+	errorPool.Put(e)
 }
 
 // IsError checks if an error is an instance of *Error.
@@ -681,6 +766,43 @@ func Name(err error) string {
 		return e.name
 	}
 	return ""
+}
+
+func Has(err error) bool {
+	if e, ok := err.(*Error); ok {
+		return e.Has()
+	}
+	return err != nil
+}
+
+// Null checks if an error is completely null/empty across all error types.
+// Handles: nil errors, *Error types, sql.Null* types, and zero-valued errors.
+func Null(err error) bool {
+	if err == nil {
+		return true
+	}
+
+	// Handle *Error types using their Null() method
+	if e, ok := err.(*Error); ok {
+		return e.Null()
+	}
+
+	// Handle sql.Null types
+	if sqlNull(err) {
+		return true
+	}
+
+	// Handle empty error strings
+	if err.Error() == "" {
+		return true
+	}
+
+	// Handle nil concrete error types via reflection
+	val := reflect.ValueOf(err)
+	if val.Kind() == reflect.Ptr && val.IsNil() {
+		return true
+	}
+	return false
 }
 
 // With adds a key-value pair to an error's context, if it is an *Error.

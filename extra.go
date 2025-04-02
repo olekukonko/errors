@@ -70,7 +70,7 @@ func (m *MultiError) Unwrap() []error {
 }
 
 // HasError reports whether the MultiError contains any errors.
-func (m *MultiError) HasError() bool {
+func (m *MultiError) Has() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.errors) > 0

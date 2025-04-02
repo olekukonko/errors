@@ -270,3 +270,26 @@ func TestRetryWithCallback(t *testing.T) {
 		t.Error("Expected retry to exhaust with error, got nil")
 	}
 }
+
+func TestStackPresence(t *testing.T) {
+	// New errors should have no stack
+	err := New("test")
+	if len(err.Stack()) != 0 {
+		t.Error("New() should not capture stack")
+	}
+
+	// Traced errors should have stack
+	traced := Trace("test")
+	if len(traced.Stack()) == 0 {
+		t.Error("Trace() should capture stack")
+	}
+}
+
+func TestStackDepth(t *testing.T) {
+	err := Trace("test")
+	frames := err.Stack()
+	if len(frames) > currentConfig.stackDepth {
+		t.Errorf("Stack depth %d exceeds configured max %d",
+			len(frames), currentConfig.stackDepth)
+	}
+}
