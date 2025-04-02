@@ -81,6 +81,19 @@ func Has(err error) bool {
 	return err != nil
 }
 
+// HasContextKey checks if the error's context contains the specified key.
+// Returns false for non-*Error types or if the key is not present.
+func HasContextKey(err error, key string) bool {
+	if e, ok := err.(*Error); ok {
+		ctx := e.Context()
+		if ctx != nil {
+			_, exists := ctx[key]
+			return exists
+		}
+	}
+	return false
+}
+
 // Is wraps errors.Is, using custom matching for *Error types.
 // Falls back to standard errors.Is for non-*Error types.
 func Is(err, target error) bool {
@@ -163,6 +176,19 @@ func Null(err error) bool {
 		return true
 	}
 	return false
+}
+
+// UnwrapAll returns a slice of all errors in the chain, including the root error.
+// Traverses both Unwrap() and Cause() chains; returns nil if err is nil.
+func UnwrapAll(err error) []error {
+	if err == nil {
+		return nil
+	}
+	var result []error
+	Walk(err, func(e error) {
+		result = append(result, e)
+	})
+	return result
 }
 
 // Stack extracts the stack trace from an error, if it is an *Error.

@@ -325,6 +325,25 @@ func (e *Error) Has() bool {
 	return e != nil && (e.msg != "" || e.template != "" || e.name != "" || e.cause != nil)
 }
 
+// HasContextKey checks if the specified key exists in the error's context.
+func (e *Error) HasContextKey(key string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	if e.smallCount > 0 {
+		for i := int32(0); i < e.smallCount; i++ {
+			if e.smallContext[i].key == key {
+				return true
+			}
+		}
+	}
+	if e.context != nil {
+		_, exists := e.context[key]
+		return exists
+	}
+	return false
+}
+
 // Increment increases the error's count by 1 and returns the error.
 // Uses atomic operation for thread safety.
 func (e *Error) Increment() *Error {
@@ -589,6 +608,19 @@ func (e *Error) Transform(fn func(*Error)) *Error {
 // Implements the errors.Unwrap interface for unwrapping chains.
 func (e *Error) Unwrap() error {
 	return e.cause
+}
+
+// UnwrapAll returns a slice of all errors in the chain, starting with this error.
+// Traverses both Unwrap() and Cause() chains.
+func (e *Error) UnwrapAll() []error {
+	if e == nil {
+		return nil
+	}
+	var result []error
+	e.Walk(func(err error) {
+		result = append(result, err)
+	})
+	return result
 }
 
 // Walk traverses the error chain, applying fn to each error.
