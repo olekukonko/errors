@@ -231,6 +231,13 @@ func FromContext(ctx context.Context, err error) *Error {
 // Error returns the string representation of the error.
 // It prioritizes msg, then template, then name, falling back to "unknown error".
 // If a callback is set, it is executed before returning the message.
+func (e *Error) Err() error {
+	return e
+}
+
+// Error returns the string representation of the error.
+// It prioritizes msg, then template, then name, falling back to "unknown error".
+// If a callback is set, it is executed before returning the message.
 func (e *Error) Error() string {
 	if e.callback != nil {
 		e.callback()
@@ -504,6 +511,35 @@ func (e *Error) Trace() *Error {
 		e.stack = captureStack(1)
 	}
 	return e
+}
+
+// Transform applies transformations to the error if it's a *Error.
+// Returns a new transformed error or the original if no changes needed.
+func (e *Error) Transform(fn func(*Error)) *Error {
+	if e == nil || fn == nil {
+		return e
+	}
+	newErr := e.Copy()
+	fn(newErr)
+	return newErr
+}
+
+// Walk traverses the error chain, applying fn to each error.
+// Starts with the current error and follows both Unwrap() and Cause() chains.
+func (e *Error) Walk(fn func(error)) {
+	if e == nil || fn == nil {
+		return
+	}
+	Walk(e, fn) // Reuse the package-level Walk function
+}
+
+// Find searches the error chain for the first error matching pred.
+// Starts with the current error and follows both Unwrap() and Cause() chains.
+func (e *Error) Find(pred func(error) bool) error {
+	if e == nil || pred == nil {
+		return nil
+	}
+	return Find(e, pred) // Reuse the package-level Find function
 }
 
 // Copy creates a deep copy of the error, preserving all fields except stack.
@@ -872,19 +908,53 @@ func As(err error, target interface{}) bool {
 }
 
 // Transform applies transformations to an error if it's a *Error.
-// Returns the original error if it's not a *Error or if fn is nil.
+// Returns a new transformed error or the original if no changes needed.
 func Transform(err error, fn func(*Error)) error {
 	if err == nil || fn == nil {
 		return err
 	}
 
 	if e, ok := err.(*Error); ok {
-		// Create a copy to avoid modifying the original
-		newErr := e.Copy()
-		fn(newErr)
-		return newErr
+		return e.Transform(fn) // Reuse the method implementation
 	}
-
-	// For non-*Error types, return as-is
 	return err
+}
+
+// Walk traverses the error chain, applying fn to each error.
+// Works with both *Error and standard error chains.
+func Walk(err error, fn func(error)) {
+	for current := err; current != nil; {
+		fn(current)
+
+		// Try Unwrap first, then fall back to Cause
+		switch v := current.(type) {
+		case interface{ Unwrap() error }:
+			current = v.Unwrap()
+		case interface{ Cause() error }:
+			current = v.Cause()
+		default:
+			return
+		}
+	}
+}
+
+// Find searches the error chain for the first error matching pred.
+// Returns nil if no match found.
+func Find(err error, pred func(error) bool) error {
+	for current := err; current != nil; {
+		if pred(current) {
+			return current
+		}
+
+		// Try Unwrap first, then fall back to Cause
+		switch v := current.(type) {
+		case interface{ Unwrap() error }:
+			current = v.Unwrap()
+		case interface{ Cause() error }:
+			current = v.Cause()
+		default:
+			return nil
+		}
+	}
+	return nil
 }

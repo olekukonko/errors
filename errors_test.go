@@ -322,3 +322,59 @@ func TestTransform(t *testing.T) {
 		}
 	})
 }
+
+// Custom error type to create a chain of errors
+type customError struct {
+	msg   string
+	cause error
+}
+
+func (e *customError) Error() string {
+	return e.msg
+}
+
+func (e *customError) Cause() error {
+	return e.cause
+}
+
+func TestWalk(t *testing.T) {
+	// Create a chain of errors
+	err1 := &customError{msg: "first error", cause: nil}
+	err2 := &customError{msg: "second error", cause: err1}
+	err3 := &customError{msg: "third error", cause: err2}
+
+	var errorsWalked []string
+	Walk(err3, func(e error) {
+		errorsWalked = append(errorsWalked, e.Error())
+	})
+
+	expected := []string{"third error", "second error", "first error"}
+	if !reflect.DeepEqual(errorsWalked, expected) {
+		t.Errorf("Walk() = %v; want %v", errorsWalked, expected)
+	}
+}
+
+func TestFind(t *testing.T) {
+	// Create a chain of errors
+	err1 := &customError{msg: "first error", cause: nil}
+	err2 := &customError{msg: "second error", cause: err1}
+	err3 := &customError{msg: "third error", cause: err2}
+
+	// Test finding a specific error
+	found := Find(err3, func(e error) bool {
+		return e.Error() == "second error"
+	})
+
+	if found == nil || found.Error() != "second error" {
+		t.Errorf("Find() = %v; want 'second error'", found)
+	}
+
+	// Test for a non-existing error
+	found = Find(err3, func(e error) bool {
+		return e.Error() == "non-existent error"
+	})
+
+	if found != nil {
+		t.Errorf("Find() = %v; want nil", found)
+	}
+}
