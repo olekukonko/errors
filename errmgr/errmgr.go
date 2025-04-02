@@ -4,12 +4,10 @@ package errmgr
 
 import (
 	"fmt"
+	"github.com/olekukonko/errors"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"unsafe"
-
-	"github.com/olekukonko/errors"
 )
 
 // Config holds configuration for the errmgr package.
@@ -51,7 +49,7 @@ type codeRegistry struct {
 
 // shardedCounter provides a low-contention counter for error occurrences.
 type shardedCounter struct {
-	counts sync.Map // map[string]*[8]struct{value uint64; pad [56]byte}
+	counts sync.Map
 }
 
 // Categorized creates a categorized error template and returns a function to create errors.
@@ -139,19 +137,12 @@ func GetThreshold(name string) (uint64, bool) {
 // Inc increments the counter for a specific name in a shard and checks thresholds.
 // Returns the new count for the shard; use Value() for the total count.
 func (c *shardedCounter) Inc(name string) uint64 {
-	shardPtr, _ := c.counts.LoadOrStore(name, &[8]struct {
-		value uint64
-		pad   [56]byte
-	}{})
-	shards := shardPtr.(*[8]struct {
-		value uint64
-		pad   [56]byte
-	})
-	shard := uint64(uintptr(unsafe.Pointer(&shards))) % 8
-	newCount := atomic.AddUint64(&shards[shard].value, 1)
+	countPtr, _ := c.counts.LoadOrStore(name, new(uint64))
+	count := countPtr.(*uint64)
+	newCount := atomic.AddUint64(count, 1)
 
 	if thresh, ok := registry.thresholds.Load(name); ok {
-		total := c.Value(name)
+		total := atomic.LoadUint64(count)
 		if total >= thresh.(uint64) {
 			if ch, ok := registry.alerts.Load(name); ok {
 				ac := ch.(*alertChannel)
@@ -209,10 +200,7 @@ func Metrics() map[string]uint64 {
 // RegisterName ensures a counter exists for the name without incrementing it.
 // Thread-safe; useful for pre-registering error names.
 func (c *shardedCounter) RegisterName(name string) {
-	c.counts.LoadOrStore(name, &[8]struct {
-		value uint64
-		pad   [56]byte
-	}{})
+	c.counts.LoadOrStore(name, new(uint64))
 }
 
 // RemoveThreshold removes the threshold for a specific error name.
@@ -245,14 +233,8 @@ func ResetCounter(name string) {
 // Reset resets the counter for a specific name across all shards.
 // Thread-safe; no effect if the name isn’t registered.
 func (c *shardedCounter) Reset(name string) {
-	if shardPtr, ok := c.counts.Load(name); ok {
-		shards := shardPtr.(*[8]struct {
-			value uint64
-			pad   [56]byte
-		})
-		for i := range shards {
-			atomic.StoreUint64(&shards[i].value, 0)
-		}
+	if countPtr, ok := c.counts.Load(name); ok {
+		atomic.StoreUint64(countPtr.(*uint64), 0)
 	}
 }
 
@@ -280,16 +262,8 @@ func Tracked(name string, fn func(...interface{}) *errors.Error) func(...interfa
 // Value returns the total count for a specific name across all shards.
 // Thread-safe; returns 0 if the name isn’t registered.
 func (c *shardedCounter) Value(name string) uint64 {
-	if shardPtr, ok := c.counts.Load(name); ok {
-		shards := shardPtr.(*[8]struct {
-			value uint64
-			pad   [56]byte
-		})
-		var total uint64
-		for i := range shards {
-			total += atomic.LoadUint64(&shards[i].value)
-		}
-		return total
+	if countPtr, ok := c.counts.Load(name); ok {
+		return atomic.LoadUint64(countPtr.(*uint64))
 	}
 	return 0
 }
