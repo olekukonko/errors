@@ -1,6 +1,7 @@
 package errors
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strings"
@@ -61,6 +62,19 @@ func Find(err error, pred func(error) bool) error {
 		}
 	}
 	return nil
+}
+
+// FromContext creates an error from a context and an existing error.
+// Adds timeout info if applicable; returns nil if input error is nil.
+func FromContext(ctx context.Context, err error) *Error {
+	if err == nil {
+		return nil
+	}
+	e := New(err.Error())
+	if ctx.Err() == context.DeadlineExceeded {
+		e.WithTimeout()
+	}
+	return e
 }
 
 // Category returns the category of an error, if it is an *Error.

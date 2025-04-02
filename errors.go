@@ -2,7 +2,6 @@ package errors
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,6 +103,80 @@ func init() {
 	WarmPool(warmUpSize) // Pre-warm pool with initial errors
 }
 
+// Configure updates the global configuration for the errors package.
+// Thread-safe; should be called before heavy usage for optimal performance.
+// Changes apply immediately to all subsequent error operations.
+func Configure(cfg Config) {
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	if cfg.StackDepth != 0 {
+		currentConfig.stackDepth = cfg.StackDepth
+	}
+	if cfg.ContextSize != 0 {
+		currentConfig.contextSize = cfg.ContextSize
+	}
+	currentConfig.disablePooling = cfg.DisablePooling
+	currentConfig.filterInternal = cfg.FilterInternal
+	currentConfig.autoFree = cfg.AutoFree
+}
+
+// newError creates a new Error instance, using the pool if enabled.
+// Initializes smallContext and stack appropriately.
+func newError() *Error {
+	if currentConfig.disablePooling {
+		return &Error{
+			smallContext: [contextSize]contextItem{},
+			stack:        nil,
+		}
+	}
+	return errorPool.Get()
+}
+
+// Empty creates a new empty error with no stack trace.
+// Useful as a base for building errors incrementally.
+func Empty() *Error {
+	return newError()
+}
+
+// Named creates a new error with a specific name and stack trace.
+// The name is used as the error message if no other message is set.
+func Named(name string) *Error {
+	e := newError()
+	e.name = name
+	return e.WithStack()
+}
+
+// New creates a fast, lightweight error without stack tracing.
+// Use instead of Trace() when stack traces aren't needed for better performance.
+func New(text string) *Error {
+	err := newError()
+	err.msg = text
+	return err
+}
+
+// Newf is an alias to Errorf for fmt.Errorf compatibility.
+// Creates a formatted error without stack traces.
+func Newf(format string, args ...interface{}) *Error {
+	err := newError()
+	err.msg = fmt.Sprintf(format, args...)
+	return err
+}
+
+// Trace creates an error with stack trace capture enabled.
+// Use when call stacks are needed for debugging; has performance overhead.
+func Trace(text string) *Error {
+	e := New(text)
+	return e.WithStack()
+}
+
+// Tracef creates a formatted error with stack trace.
+// Combines Errorf and WithStack for convenience.
+func Tracef(format string, args ...interface{}) *Error {
+	e := Errorf(format, args...)
+	return e.WithStack()
+}
+
 // As attempts to assign the error or its cause to the target interface.
 // Implements the errors.As interface for type assertion compatibility.
 func (e *Error) As(target interface{}) bool {
@@ -145,24 +218,6 @@ func (e *Error) Category() string {
 // Returns 0 if no code is defined.
 func (e *Error) Code() int {
 	return int(e.code)
-}
-
-// Configure updates the global configuration for the errors package.
-// Thread-safe; should be called before heavy usage for optimal performance.
-// Changes apply immediately to all subsequent error operations.
-func Configure(cfg Config) {
-	configMu.Lock()
-	defer configMu.Unlock()
-
-	if cfg.StackDepth != 0 {
-		currentConfig.stackDepth = cfg.StackDepth
-	}
-	if cfg.ContextSize != 0 {
-		currentConfig.contextSize = cfg.ContextSize
-	}
-	currentConfig.disablePooling = cfg.DisablePooling
-	currentConfig.filterInternal = cfg.FilterInternal
-	currentConfig.autoFree = cfg.AutoFree
 }
 
 // Context returns the error's context as a map.
@@ -219,12 +274,6 @@ func (e *Error) Copy() *Error {
 // Useful for tracking occurrence frequency.
 func (e *Error) Count() uint64 {
 	return e.count
-}
-
-// Empty creates a new empty error with no stack trace.
-// Useful as a base for building errors incrementally.
-func Empty() *Error {
-	return newError()
 }
 
 // Err returns the error as an error interface.
@@ -341,19 +390,6 @@ func (e *Error) Free() {
 	}
 
 	errorPool.Put(e)
-}
-
-// FromContext creates an error from a context and an existing error.
-// Adds timeout info if applicable; returns nil if input error is nil.
-func FromContext(ctx context.Context, err error) *Error {
-	if err == nil {
-		return nil
-	}
-	e := New(err.Error())
-	if ctx.Err() == context.DeadlineExceeded {
-		e.WithTimeout()
-	}
-	return e
 }
 
 // Has checks if the error contains meaningful content.
@@ -510,42 +546,6 @@ func (e *Error) Name() string {
 	return e.name
 }
 
-// Named creates a new error with a specific name and stack trace.
-// The name is used as the error message if no other message is set.
-func Named(name string) *Error {
-	e := newError()
-	e.name = name
-	return e.WithStack()
-}
-
-// New creates a fast, lightweight error without stack tracing.
-// Use instead of Trace() when stack traces aren't needed for better performance.
-func New(text string) *Error {
-	err := newError()
-	err.msg = text
-	return err
-}
-
-// Newf is an alias to Errorf for fmt.Errorf compatibility.
-// Creates a formatted error without stack traces.
-func Newf(format string, args ...interface{}) *Error {
-	err := newError()
-	err.msg = fmt.Sprintf(format, args...)
-	return err
-}
-
-// newError creates a new Error instance, using the pool if enabled.
-// Initializes smallContext and stack appropriately.
-func newError() *Error {
-	if currentConfig.disablePooling {
-		return &Error{
-			smallContext: [contextSize]contextItem{},
-			stack:        nil,
-		}
-	}
-	return errorPool.Get()
-}
-
 // Null checks if an error is nil or empty across various error types.
 // Considers basic fields, context, and wrapped causes.
 func (e *Error) Null() bool {
@@ -643,20 +643,6 @@ func (e *Error) Trace() *Error {
 	return e
 }
 
-// Trace creates an error with stack trace capture enabled.
-// Use when call stacks are needed for debugging; has performance overhead.
-func Trace(text string) *Error {
-	e := New(text)
-	return e.WithStack()
-}
-
-// Tracef creates a formatted error with stack trace.
-// Combines Errorf and WithStack for convenience.
-func Tracef(format string, args ...interface{}) *Error {
-	e := Errorf(format, args...)
-	return e.WithStack()
-}
-
 // Transform applies transformations to the error if it's a *Error.
 // Returns a new transformed error or the original if no changes needed.
 func (e *Error) Transform(fn func(*Error)) *Error {
@@ -694,22 +680,6 @@ func (e *Error) Walk(fn func(error)) {
 		return
 	}
 	Walk(e, fn)
-}
-
-// WarmPool pre-populates the error pool with a specified number of instances.
-// Reduces allocation overhead during initial usage; no effect if pooling is disabled.
-func WarmPool(count int) {
-	if currentConfig.disablePooling {
-		return
-	}
-	for i := 0; i < count; i++ {
-		e := &Error{
-			smallContext: [contextSize]contextItem{},
-			stack:        nil,
-		}
-		errorPool.Put(e)
-		stackPool.Put(make([]uintptr, 0, currentConfig.stackDepth))
-	}
 }
 
 // With adds a key-value pair to the error's context.
@@ -811,4 +781,20 @@ func (e *Error) WrapNotNil(cause error) *Error {
 		e.cause = cause
 	}
 	return e
+}
+
+// WarmPool pre-populates the error pool with a specified number of instances.
+// Reduces allocation overhead during initial usage; no effect if pooling is disabled.
+func WarmPool(count int) {
+	if currentConfig.disablePooling {
+		return
+	}
+	for i := 0; i < count; i++ {
+		e := &Error{
+			smallContext: [contextSize]contextItem{},
+			stack:        nil,
+		}
+		errorPool.Put(e)
+		stackPool.Put(make([]uintptr, 0, currentConfig.stackDepth))
+	}
 }
