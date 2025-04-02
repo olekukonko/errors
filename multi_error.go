@@ -2,6 +2,7 @@ package errors
 
 import (
 	"fmt"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ type MultiError struct {
 	formatter  ErrorFormatter // Custom formatting function for error string
 	sampling   bool           // Whether sampling is enabled to limit error collection
 	sampleRate uint32         // Sampling percentage (1-100) when sampling is enabled
+	rand       *rand.Rand     // Random source for sampling (nil defaults to fastRand)
 }
 
 // ErrorFormatter defines a function for custom error message formatting.
@@ -37,7 +39,13 @@ func (m *MultiError) Add(err error) {
 
 	// Apply sampling if enabled and not the first error
 	if m.sampling && len(m.errors) > 0 {
-		if fastRand()%100 >= m.sampleRate {
+		var r uint32
+		if m.rand != nil {
+			r = uint32(m.rand.Int31n(100))
+		} else {
+			r = fastRand() % 100
+		}
+		if r >= m.sampleRate {
 			return
 		}
 	}
@@ -240,6 +248,14 @@ func WithSampling(rate uint32) MultiErrorOption {
 		}
 		m.sampling = true
 		m.sampleRate = rate
+	}
+}
+
+// WithRand sets a custom random source for sampling, useful for testing.
+// Returns a MultiErrorOption for use with NewMultiError.
+func WithRand(r *rand.Rand) MultiErrorOption {
+	return func(m *MultiError) {
+		m.rand = r
 	}
 }
 

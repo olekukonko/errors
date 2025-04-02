@@ -4,6 +4,7 @@ package errors
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"testing"
 )
 
@@ -32,21 +33,21 @@ func TestMultiError_Basic(t *testing.T) {
 }
 
 func TestMultiError_Sampling(t *testing.T) {
-	m := NewMultiError(WithSampling(50))
+	// Seed the random source for deterministic results
+	r := rand.New(rand.NewSource(42))
+	m := NewMultiError(WithSampling(50), WithRand(r))
 	total := 1000
-	added := 0
 
 	for i := 0; i < total; i++ {
 		m.Add(errors.New("test"))
-		added++
 	}
 
 	count := m.Count()
 	ratio := float64(count) / float64(total)
 
-	// Check if sampling is roughly 50%
-	if ratio < 0.4 || ratio > 0.6 {
-		t.Errorf("Sampling ratio %v not within expected range (40-60%%)", ratio)
+	// With a seeded rand, expect roughly 50% ± 5% due to deterministic sequence
+	if ratio < 0.45 || ratio > 0.55 {
+		t.Errorf("Sampling ratio %v not within expected range (45-55%%)", ratio)
 	}
 }
 
