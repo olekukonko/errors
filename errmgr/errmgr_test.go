@@ -140,3 +140,35 @@ func TestMonitorAlerts(t *testing.T) {
 		t.Error("No alert received within timeout")
 	}
 }
+
+func TestMonitorChannelCloseRace(t *testing.T) {
+	Reset()
+	SetThreshold("RaceError", 1)
+
+	// Create and immediately close monitor to simulate quick close
+	monitor := NewMonitor("RaceError")
+	monitor.Close()
+
+	// This should not panic even though we're trying to send to closed channel
+	errFunc := Define("RaceError", "race test %d")
+	for i := 0; i < 3; i++ {
+		err := errFunc(i)
+		err.Free()
+	}
+
+	// Create new monitor and verify it works
+	newMonitor := NewMonitor("RaceError")
+	defer newMonitor.Close()
+
+	err := errFunc(42)
+	err.Free()
+
+	select {
+	case alert := <-newMonitor.Alerts():
+		if alert.Name() != "RaceError" || alert.Count() < 1 {
+			t.Errorf("Expected alert for RaceError, got %s:%d", alert.Name(), alert.Count())
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("No alert received within timeout")
+	}
+}

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"github.com/olekukonko/errors"
@@ -81,18 +80,20 @@ func (c *shardedCounter) Inc(name string) uint64 {
 		total := c.Value(name)
 		if total >= thresh.(uint64) {
 			if ch, ok := registry.alerts.Load(name); ok {
-				go func(ch chan *errors.Error) {
+				ac := ch.(*alertChannel)
+				ac.mu.Lock()
+				if !ac.closed {
 					alert := errors.New(fmt.Sprintf("%s count exceeded threshold: %d", name, total)).
 						WithName(name)
 					for i := uint64(0); i < total; i++ {
-						alert.Increment()
+						_ = alert.Increment()
 					}
 					select {
-					case ch <- alert:
-					case <-time.After(1 * time.Second):
-						return // Drop if channel is closed or full
+					case ac.ch <- alert:
+					default: // Drop if channel is full
 					}
-				}(ch.(chan *errors.Error))
+				}
+				ac.mu.Unlock()
 			}
 		}
 	}

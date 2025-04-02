@@ -56,3 +56,20 @@ func BenchmarkMetrics(b *testing.B) {
 		_ = Metrics()
 	}
 }
+
+func BenchmarkMonitorWithClosedChannel(b *testing.B) {
+	Reset()
+	SetThreshold("BenchError", 1)
+
+	// Create and close monitor to test closed channel case
+	monitor := NewMonitor("BenchError")
+	monitor.Close()
+
+	errFunc := Define("BenchError", "bench test %d")
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		err := errFunc(i)
+		err.Free()
+	}
+}

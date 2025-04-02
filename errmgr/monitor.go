@@ -1,13 +1,23 @@
 // Package errmgr provides error monitoring functionality.
 package errmgr
 
-import "github.com/olekukonko/errors"
+import (
+	"github.com/olekukonko/errors"
+	"sync"
+)
+
+// alertChannel wraps a channel with synchronization
+type alertChannel struct {
+	ch     chan *errors.Error
+	closed bool
+	mu     sync.Mutex
+}
 
 // Monitor represents an error monitoring channel for a specific error name.
 // It receives alerts when the error count exceeds a configured threshold.
 type Monitor struct {
 	name string
-	ch   chan *errors.Error
+	ac   *alertChannel
 }
 
 // NewMonitor creates a new Monitor for the given error name.
@@ -15,18 +25,22 @@ type Monitor struct {
 func NewMonitor(name string) *Monitor {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	if ch, ok := registry.alerts.Load(name); ok {
-		return &Monitor{name: name, ch: ch.(chan *errors.Error)}
+
+	if existing, ok := registry.alerts.Load(name); ok {
+		return &Monitor{name: name, ac: existing.(*alertChannel)}
 	}
-	ch := make(chan *errors.Error, 10)
-	registry.alerts.Store(name, ch)
-	return &Monitor{name: name, ch: ch}
+
+	ac := &alertChannel{
+		ch: make(chan *errors.Error, 10),
+	}
+	registry.alerts.Store(name, ac)
+	return &Monitor{name: name, ac: ac}
 }
 
 // Alerts returns the channel for receiving error alerts.
 // Alerts are sent when the error count exceeds the threshold set by SetThreshold.
 func (m *Monitor) Alerts() <-chan *errors.Error {
-	return m.ch
+	return m.ac.ch
 }
 
 // Close shuts down the monitor channel and removes it from the registry.
@@ -34,9 +48,16 @@ func (m *Monitor) Alerts() <-chan *errors.Error {
 func (m *Monitor) Close() {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	if ch, ok := registry.alerts.LoadAndDelete(m.name); ok {
-		if chanPtr, ok := ch.(chan *errors.Error); ok && chanPtr != nil {
-			close(chanPtr)
+
+	if existing, ok := registry.alerts.Load(m.name); ok {
+		if ac, ok := existing.(*alertChannel); ok && ac == m.ac {
+			ac.mu.Lock()
+			if !ac.closed {
+				close(ac.ch)
+				ac.closed = true
+			}
+			ac.mu.Unlock()
+			registry.alerts.Delete(m.name)
 		}
 	}
 }
