@@ -870,3 +870,21 @@ func As(err error, target interface{}) bool {
 	}
 	return errors.As(err, target)
 }
+
+// Transform applies transformations to an error if it's a *Error.
+// Returns the original error if it's not a *Error or if fn is nil.
+func Transform(err error, fn func(*Error)) error {
+	if err == nil || fn == nil {
+		return err
+	}
+
+	if e, ok := err.(*Error); ok {
+		// Create a copy to avoid modifying the original
+		newErr := e.Copy()
+		fn(newErr)
+		return newErr
+	}
+
+	// For non-*Error types, return as-is
+	return err
+}

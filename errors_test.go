@@ -293,3 +293,32 @@ func TestStackDepth(t *testing.T) {
 			len(frames), currentConfig.stackDepth)
 	}
 }
+
+func TestTransform(t *testing.T) {
+	t.Run("NilError", func(t *testing.T) {
+		if Transform(nil, func(e *Error) {}) != nil {
+			t.Error("Should handle nil error")
+		}
+	})
+
+	t.Run("NonErrorType", func(t *testing.T) {
+		stdErr := errors.New("standard")
+		if Transform(stdErr, func(e *Error) {}) != stdErr {
+			t.Error("Should return non-*Error unchanged")
+		}
+	})
+
+	t.Run("TransformError", func(t *testing.T) {
+		orig := New("original")
+		transformed := Transform(orig, func(e *Error) {
+			e.With("key", "value")
+		}).(*Error)
+
+		if transformed == orig {
+			t.Error("Should return a copy")
+		}
+		if transformed.Context()["key"] != "value" {
+			t.Error("Should apply transformations")
+		}
+	})
+}
