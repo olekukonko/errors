@@ -58,6 +58,13 @@ func min(a, b int) int {
 	return b
 }
 
+// Clear map
+func clearMap(m map[string]interface{}) {
+	for k := range m {
+		delete(m, k)
+	}
+}
+
 // Helper function to detect sql.Null types
 func sqlNull(v interface{}) bool {
 	if v == nil {

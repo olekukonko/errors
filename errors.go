@@ -17,7 +17,7 @@ const (
 	ctxTimeout = "[error] timeout"
 	ctxRetry   = "[error] retry"
 
-	contextSize = 2
+	contextSize = 4
 	bufferSize  = 256
 	warmUpSize  = 100
 	stackDepth  = 32
@@ -121,11 +121,11 @@ type Error struct {
 	_ [4]byte // Ensures that the next field (context) is 8-byte aligned (critical for performance).
 
 	// Cold Path (less frequently accessed fields, often used for additional context or error chaining)
-	context      map[string]interface{} // Additional context data (8 bytes), typically a pointer to a map.
-	cause        error                  // The underlying cause of the error (16 bytes), supports error chaining.
-	callback     func()                 // Optional callback function (8 bytes), executed on error retrieval.
-	smallContext [2]contextItem         // Fixed-size array (64 bytes), holds key/value pairs for smaller context.
-	smallCount   int32                  // Number of items stored in `smallContext` (4 bytes).
+	context      map[string]interface{}   // Additional context data (8 bytes), typically a pointer to a map.
+	cause        error                    // The underlying cause of the error (16 bytes), supports error chaining.
+	callback     func()                   // Optional callback function (8 bytes), executed on error retrieval.
+	smallContext [contextSize]contextItem // Fixed-size array (64 bytes), holds key/value pairs for smaller context.
+	smallCount   int32                    // Number of items stored in `smallContext` (4 bytes).
 
 	// ↓ Padding for mutex alignment ↓
 	_ [3]byte // Ensures that the mutex (`sync.RWMutex`) is aligned on an 8-byte boundary.
@@ -422,12 +422,11 @@ func (e *Error) Wrap(cause error) *Error {
 }
 
 // With adds a key-value pair to the error's context.
-// Stores up to 2 items in a fixed array; additional items use a map.
 func (e *Error) With(key string, value interface{}) *Error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if e.smallCount < 2 {
+	if e.smallCount < contextSize {
 		e.smallContext[e.smallCount] = contextItem{key, value}
 		e.smallCount++
 		return e
