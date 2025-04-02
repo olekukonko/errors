@@ -16,13 +16,12 @@ func init() {
 	errorPool = sync.Pool{
 		New: func() interface{} {
 			e := &Error{
-				pooled:       true,
 				smallContext: [contextSize]contextItem{},
 				stack:        make([]uintptr, 0, currentConfig.stackDepth),
 			}
 			if currentConfig.autofree {
 				runtime.SetFinalizer(e, func(e *Error) {
-					if e.pooled && !currentConfig.disablePooling {
+					if !currentConfig.disablePooling {
 						e.Reset()
 						// Keep pre-allocated memory
 						e.stack = e.stack[:0]
@@ -37,7 +36,6 @@ func init() {
 	currentConfig = cachedConfig{
 		stackDepth:     stackDepth,
 		contextSize:    contextSize,
-		disableStack:   false,
 		disablePooling: true,
 		filterInternal: true,
 		autofree:       false,
@@ -47,11 +45,9 @@ func init() {
 
 func getPooledError() *Error {
 	if currentConfig.disablePooling {
-		return &Error{pooled: false}
+		return &Error{}
 	}
-
 	e := errorPool.Get().(*Error)
-	e.pooled = true
 	e.Reset()
 	runtime.SetFinalizer(e, nil) // Remove temporary finalizer
 	return e
