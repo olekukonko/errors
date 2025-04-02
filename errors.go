@@ -464,6 +464,33 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 	return result, nil
 }
 
+// Merge combines this error with another, aggregating context and stack.
+// Returns a new *Error; original error remains unchanged.
+func (e *Error) Merge(other error) *Error {
+	if other == nil {
+		return e.Copy()
+	}
+	result := e.Copy()
+	if o, ok := other.(*Error); ok {
+		result.msg = e.Error() + "; " + o.Error()
+		if o.stack != nil && result.stack == nil {
+			result.WithStack()
+		}
+		if ctx := o.Context(); ctx != nil {
+			for k, v := range ctx {
+				result.With(k, v)
+			}
+		}
+		if o.cause != nil {
+			result.Wrap(o.cause)
+		}
+	} else {
+		result.msg = e.Error() + "; " + other.Error()
+		result.Wrap(other)
+	}
+	return result
+}
+
 // Msgf sets the error message using a formatted string.
 // Overwrites any existing message; returns the error for chaining.
 func (e *Error) Msgf(format string, args ...interface{}) *Error {

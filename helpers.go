@@ -139,6 +139,41 @@ func IsTimeout(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "timeout")
 }
 
+// Merge combines multiple errors into a single *Error.
+// Aggregates messages, contexts, and stacks; returns nil if no errors provided.
+func Merge(errs ...error) *Error {
+	if len(errs) == 0 {
+		return nil
+	}
+	var messages []string
+	combined := New("")
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		messages = append(messages, err.Error())
+		if e, ok := err.(*Error); ok {
+			if e.stack != nil && combined.stack == nil {
+				combined.WithStack() // Capture stack from first *Error with stack
+			}
+			if ctx := e.Context(); ctx != nil {
+				for k, v := range ctx {
+					combined.With(k, v)
+				}
+			}
+			if e.cause != nil {
+				combined.Wrap(e.cause)
+			}
+		} else {
+			combined.Wrap(err)
+		}
+	}
+	if len(messages) > 0 {
+		combined.msg = strings.Join(messages, "; ")
+	}
+	return combined
+}
+
 // Name returns the name of an error, if it is an *Error.
 // Returns an empty string for non-*Error types.
 func Name(err error) string {
