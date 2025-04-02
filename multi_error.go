@@ -50,6 +50,14 @@ func (m *MultiError) Add(err error) {
 	m.errors = append(m.errors, err)
 }
 
+// Clear removes all errors from the collection.
+// Thread-safe; resets the slice while preserving capacity.
+func (m *MultiError) Clear() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.errors = m.errors[:0]
+}
+
 // Count returns the number of errors in the collection.
 // Thread-safe.
 func (m *MultiError) Count() int {
@@ -78,8 +86,8 @@ func (m *MultiError) Error() string {
 	}
 }
 
-// Errors returns a copy of the contained errors.
-// Thread-safe; returns an empty slice if no errors exist.
+// Errors returns a copy of the contained Historic.
+// Thread-safe; returns nil if no errors exist.
 func (m *MultiError) Errors() []error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -93,16 +101,21 @@ func (m *MultiError) Errors() []error {
 }
 
 // Filter returns a new MultiError containing only errors that match the predicate.
-// Thread-safe; preserves original configuration.
+// Thread-safe; preserves original configuration, including sampling behavior.
 func (m *MultiError) Filter(fn func(error) bool) *MultiError {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	filtered := NewMultiError(
-		WithLimit(m.limit),
-		WithFormatter(m.formatter),
-		WithSampling(m.sampleRate),
-	)
+	var opts []MultiErrorOption
+	opts = append(opts, WithLimit(m.limit))
+	if m.formatter != nil {
+		opts = append(opts, WithFormatter(m.formatter))
+	}
+	if m.sampling {
+		opts = append(opts, WithSampling(m.sampleRate))
+	}
+
+	filtered := NewMultiError(opts...)
 	for _, err := range m.errors {
 		if fn(err) {
 			filtered.Add(err)
@@ -141,6 +154,21 @@ func (m *MultiError) Last() error {
 	return nil
 }
 
+// Merge combines another MultiError's errors into this one.
+// Thread-safe; respects limit and sampling settings.
+func (m *MultiError) Merge(other *MultiError) {
+	if other == nil || !other.Has() {
+		return
+	}
+
+	other.mu.RLock()
+	defer other.mu.RUnlock()
+
+	for _, err := range other.errors {
+		m.Add(err)
+	}
+}
+
 // NewMultiError creates a new MultiError instance with optional configuration.
 // Initial capacity is set to 4; applies options in the order provided.
 func NewMultiError(opts ...MultiErrorOption) *MultiError {
@@ -170,6 +198,12 @@ func (m *MultiError) Single() error {
 	default:
 		return m
 	}
+}
+
+// String implements the Stringer interface for a concise string representation.
+// Thread-safe; uses the same logic as Error().
+func (m *MultiError) String() string {
+	return m.Error()
 }
 
 // Unwrap returns a copy of the contained errors for multi-error unwrapping.
@@ -207,35 +241,6 @@ func WithSampling(rate uint32) MultiErrorOption {
 		m.sampling = true
 		m.sampleRate = rate
 	}
-}
-
-// Clear removes all errors from the collection.
-// Thread-safe; resets the slice while preserving capacity.
-func (m *MultiError) Clear() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.errors = m.errors[:0]
-}
-
-// Merge combines another MultiError's errors into this one.
-// Thread-safe; respects limit and sampling settings.
-func (m *MultiError) Merge(other *MultiError) {
-	if other == nil || !other.Has() {
-		return
-	}
-
-	other.mu.RLock()
-	defer other.mu.RUnlock()
-
-	for _, err := range other.errors {
-		m.Add(err)
-	}
-}
-
-// String implements the Stringer interface for a concise string representation.
-// Thread-safe; uses the same logic as Error().
-func (m *MultiError) String() string {
-	return m.Error()
 }
 
 // defaultFormat provides the default formatting for multiple errors.
