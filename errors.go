@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -287,6 +288,36 @@ func (e *Error) Find(pred func(error) bool) error {
 		return nil
 	}
 	return Find(e, pred)
+}
+
+// Format returns a formatted string representation of the error.
+func (e *Error) Format() string {
+	if e == nil {
+		return "<nil>"
+	}
+	var sb strings.Builder
+	sb.WriteString(e.Error())
+	if ctx := e.Context(); ctx != nil {
+		sb.WriteString("\ncontext: ")
+		data, _ := json.MarshalIndent(ctx, "", "  ")
+		sb.Write(data)
+	}
+	if stack := e.Stack(); len(stack) > 0 {
+		sb.WriteString("\nstack:\n")
+		for _, frame := range stack {
+			sb.WriteString(frame)
+			sb.WriteRune('\n')
+		}
+	}
+	if e.cause != nil {
+		sb.WriteString("\ncause: ")
+		if ce, ok := e.cause.(*Error); ok {
+			sb.WriteString(ce.Format())
+		} else {
+			sb.WriteString(e.cause.Error())
+		}
+	}
+	return sb.String()
 }
 
 // Free resets the error and returns it to the pool if pooling is enabled.
