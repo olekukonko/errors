@@ -205,16 +205,14 @@ func IsEmpty(err error) bool {
 // IsNull checks if an error is nil or represents a NULL value
 func IsNull(err error) bool {
 	if err == nil {
-		fmt.Println("Package IsNull: nil error, returning true")
 		return true
 	}
 	if e, ok := err.(*Error); ok {
 		result := e.IsNull()
-		fmt.Printf("Package IsNull: *Error result=%v\n", result)
 		return result
 	}
 	result := sqlNull(err)
-	fmt.Printf("Package IsNull: non-*Error, result=%v (err=%v)\n", result, err)
+	// fmt.Printf("Package IsNull: non-*Error, result=%v (err=%v)\n", result, err)
 	return result
 }
 
@@ -225,8 +223,21 @@ func IsRetryable(err error) bool {
 		return false
 	}
 	if e, ok := err.(*Error); ok {
-		if val, ok := e.Context()[ctxRetry].(bool); ok {
-			return val
+		e.mu.RLock()
+		defer e.mu.RUnlock()
+		// Check smallContext directly if context map isn’t populated
+		for i := int32(0); i < e.smallCount; i++ {
+			if e.smallContext[i].key == ctxRetry {
+				if val, ok := e.smallContext[i].value.(bool); ok {
+					return val
+				}
+			}
+		}
+		// Fallback to context map
+		if e.context != nil {
+			if val, ok := e.context[ctxRetry].(bool); ok {
+				return val
+			}
 		}
 	}
 	lowerMsg := strings.ToLower(err.Error())
@@ -399,7 +410,7 @@ func Wrap(err error, wrapper *Error) *Error {
 	}
 	newErr := wrapper.Copy()
 	newErr.cause = err
-	fmt.Printf("Wrap: created newErr %p, msg=%q, name=%q, code=%d, cause=%p\n", newErr, newErr.msg, newErr.name, newErr.code, newErr.cause)
+	// fmt.Printf("Wrap: created newErr %p, msg=%q, name=%q, code=%d, cause=%p\n", newErr, newErr.msg, newErr.name, newErr.code, newErr.cause)
 	return newErr
 }
 

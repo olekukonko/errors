@@ -546,33 +546,24 @@ func (e *Error) IsEmpty() bool {
 // Considers both the error itself and any context values
 func (e *Error) IsNull() bool {
 	if e == nil {
-		fmt.Println("IsNull: nil error, returning true")
 		return true
 	}
-
-	fmt.Printf("IsNull: msg=%q, name=%q, template=%q\n", e.msg, e.name, e.template)
-	hasContent := e.msg != "" || e.name != "" || e.template != ""
-	fmt.Printf("IsNull: smallCount=%d, context=%v, cause=%v\n", e.smallCount, e.context, e.cause)
+	// hasContent := e.msg != "" || e.name != "" || e.template != ""
 
 	// If no context or cause, and no content, it's not null
 	if e.smallCount == 0 && e.context == nil && e.cause == nil {
-		fmt.Println("IsNull: no content, returning false")
 		return false
 	}
 
 	// Check cause first - if it’s null, the whole error is null
 	if e.cause != nil {
-		fmt.Printf("IsNull: checking cause=%v\n", e.cause)
 		var isNull bool
 		if ce, ok := e.cause.(*Error); ok {
 			isNull = ce.IsNull()
-			fmt.Printf("IsNull: cause is Error, recursive result=%v\n", isNull)
 		} else {
 			isNull = sqlNull(e.cause)
-			fmt.Printf("IsNull: cause sqlNull result=%v\n", isNull)
 		}
 		if isNull {
-			fmt.Printf("IsNull: cause is null, returning true\n")
 			return true
 		}
 		// If cause isn’t null, continue checking this error’s context
@@ -580,39 +571,31 @@ func (e *Error) IsNull() bool {
 
 	// Check small context
 	if e.smallCount > 0 {
-		fmt.Printf("Is    IsNull: checking %d small context items\n", e.smallCount)
 		allNull := true
 		for i := 0; i < int(e.smallCount); i++ {
 			isNull := sqlNull(e.smallContext[i].value)
-			fmt.Printf("IsNull: smallContext[%d] key=%s, value=%v, isNull=%v\n",
-				i, e.smallContext[i].key, e.smallContext[i].value, isNull)
 			if !isNull {
 				allNull = false
 				break
 			}
 		}
-		fmt.Printf("IsNull: small context allNull=%v\n", allNull)
 		if !allNull {
-			fmt.Println("IsNull: small context has non-null values, returning false")
 			return false
 		}
 	}
 
 	// Check regular context
 	if e.context != nil {
-		fmt.Println("IsNull: checking regular context")
 		allNull := true
-		for k, v := range e.context {
+		for _, v := range e.context {
 			isNull := sqlNull(v)
-			fmt.Printf("IsNull: context key=%s, value=%v, isNull=%v\n", k, v, isNull)
+			// fmt.Printf("IsNull: context key=%s, value=%v, isNull=%v\n", k, v, isNull)
 			if !isNull {
 				allNull = false
 				break
 			}
 		}
-		fmt.Printf("IsNull: regular context allNull=%v\n", allNull)
 		if !allNull {
-			fmt.Println("IsNull: regular context has non-null values, returning false")
 			return false
 		}
 	}
@@ -620,9 +603,7 @@ func (e *Error) IsNull() bool {
 	// If we get here, either:
 	// - Cause is non-null (we’d have returned false above if it made us non-null)
 	// - All context is null and there’s no cause
-	result := (e.smallCount > 0 || e.context != nil) // Null if we have context and it’s all null
-	fmt.Printf("IsNull: final result=%v (smallCount=%d, hasContext=%v, hasContent=%v)\n",
-		result, e.smallCount, e.context != nil, hasContent)
+	result := e.smallCount > 0 || e.context != nil // Null if we have context and it’s all null
 	return result
 }
 

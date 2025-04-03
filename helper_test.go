@@ -10,29 +10,36 @@ import (
 	"time"
 )
 
-var testMu sync.Mutex // To protect global state changes
+var testMu sync.Mutex // Protect global state changes
 
 // TestHelperWarmStackPool verifies that WarmStackPool pre-populates the stack pool correctly.
 func TestHelperWarmStackPool(t *testing.T) {
 	testMu.Lock()
 	defer testMu.Unlock()
 
-	// Save and restore original config for isolation
+	// Save and restore original config
 	originalConfig := currentConfig
 	defer func() { currentConfig = originalConfig }()
 
-	// Clear pool by creating a new one
+	// Reinitialize stackPool with a nil-returning New function for this test
 	stackPool = sync.Pool{
 		New: func() interface{} {
-			return make([]uintptr, currentConfig.stackDepth)
+			return nil // Return nil when pool is empty
 		},
 	}
 
 	// Test disabled pooling
 	currentConfig.disablePooling = true
 	WarmStackPool(5)
-	if stackPool.Get() != nil {
-		t.Error("WarmStackPool should not populate when pooling is disabled")
+	if got := stackPool.Get(); got != nil {
+		t.Errorf("WarmStackPool should not populate when pooling is disabled, got %v", got)
+	}
+
+	// Reinitialize stackPool for enabled pooling test
+	stackPool = sync.Pool{
+		New: func() interface{} {
+			return make([]uintptr, currentConfig.stackDepth)
+		},
 	}
 
 	// Test enabled pooling

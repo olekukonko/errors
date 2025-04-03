@@ -64,13 +64,18 @@ func NewRetry(options ...RetryOption) *Retry {
 		maxAttempts: 3,
 		delay:       100 * time.Millisecond,
 		maxDelay:    10 * time.Second,
-		retryIf:     func(err error) bool { return IsRetryable(err) },
+		retryIf:     func(err error) bool { return IsRetryable(err) }, // Ensure this is always set
+		onRetry:     nil,
 		backoff:     ExponentialBackoff{},
 		jitter:      true,
 		ctx:         context.Background(),
 	}
 	for _, opt := range options {
 		opt(r)
+	}
+	// Ensure retryIf is never nil
+	if r.retryIf == nil {
+		r.retryIf = func(err error) bool { return IsRetryable(err) }
 	}
 	return r
 }
