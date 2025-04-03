@@ -10,26 +10,8 @@ import (
 	"strings"
 )
 
-// Stack pool and capture functions for managing stack traces.
-//var stackPool = sync.Pool{
-//	New: func() interface{} {
-//		return make([]uintptr, 0, currentConfig.stackDepth)
-//	},
-//}
-
-// WarmStackPool pre-populates the stack pool with a specified number of slices.
-// Reduces allocation overhead for stack traces; no effect if pooling is disabled.
-func WarmStackPool(count int) {
-	if currentConfig.disablePooling {
-		return
-	}
-	for i := 0; i < count; i++ {
-		stackPool.Put(make([]uintptr, 0, currentConfig.stackDepth))
-	}
-}
-
 // captureStack captures a stack trace with the configured depth.
-// skip=0 means capture current call site
+// Skip=0 captures the current call site; skips captureStack and its caller (+2 frames); thread-safe via stackPool.
 func captureStack(skip int) []uintptr {
 	buf := stackPool.Get().([]uintptr)
 	buf = buf[:cap(buf)]
@@ -41,7 +23,7 @@ func captureStack(skip int) []uintptr {
 		return nil
 	}
 
-	// Create a new slice to return (don't return pooled slice directly)
+	// Create a new slice to return, avoiding direct use of pooled memory
 	stack := make([]uintptr, n)
 	copy(stack, buf[:n])
 	stackPool.Put(buf)
@@ -50,7 +32,7 @@ func captureStack(skip int) []uintptr {
 }
 
 // min returns the smaller of two integers.
-// Helper function for limiting stack trace size.
+// Simple helper for limiting stack trace size or other comparisons.
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -58,49 +40,39 @@ func min(a, b int) int {
 	return b
 }
 
-// Clear map
+// clearMap removes all entries from a map.
+// Helper function to reset map contents without reallocating.
 func clearMap(m map[string]interface{}) {
 	for k := range m {
 		delete(m, k)
 	}
 }
 
-// Helper function to detect sql.Null types
+// sqlNull detects if a value represents a SQL NULL type.
+// Returns true for nil or invalid sql.Null* types (e.g., NullString, NullInt64); false otherwise.
 func sqlNull(v interface{}) bool {
 	if v == nil {
-		// fmt.Println("sqlNull: nil value, returning true")
 		return true
 	}
 
 	switch val := v.(type) {
 	case sql.NullString:
-		result := !val.Valid
-		// fmt.Printf("sqlNull: NullString, value=%v, valid=%v, returning %v\n", val, val.Valid, result)
-		return result
+		return !val.Valid
 	case sql.NullTime:
-		result := !val.Valid
-		// fmt.Printf("sqlNull: NullTime, value=%v, valid=%v, returning %v\n", val, val.Valid, result)
-		return result
+		return !val.Valid
 	case sql.NullInt64:
-		result := !val.Valid
-		// fmt.Printf("sqlNull: NullInt64, value=%v, valid=%v, returning %v\n", val, val.Valid, result)
-		return result
+		return !val.Valid
 	case sql.NullBool:
-		result := !val.Valid
-		// fmt.Printf("sqlNull: NullBool, value=%v, valid=%v, returning %v\n", val, val.Valid, result)
-		return result
+		return !val.Valid
 	case sql.NullFloat64:
-		result := !val.Valid
-		// fmt.Printf("sqlNull: NullFloat64, value=%v, valid=%v, returning %v\n", val, val.Valid, result)
-		return result
+		return !val.Valid
 	default:
-		// fmt.Printf("sqlNull: unknown type, value=%v, returning false\n", v)
 		return false
 	}
 }
 
 // getFuncName extracts the function name from an interface, typically a function or method.
-// Returns "unknown" if the input is nil or invalid.
+// Returns "unknown" if the input is nil or invalid; trims leading dots from runtime name.
 func getFuncName(fn interface{}) string {
 	if fn == nil {
 		return "unknown"
@@ -110,7 +82,7 @@ func getFuncName(fn interface{}) string {
 }
 
 // isInternalFrame determines if a stack frame is considered "internal".
-// Filters frames from runtime, reflect, or this package if FilterInternal is true.
+// Returns true for frames from runtime, reflect, or this package’s subdirectories if FilterInternal is true.
 func isInternalFrame(frame runtime.Frame) bool {
 	if strings.HasPrefix(frame.Function, "runtime.") || strings.HasPrefix(frame.Function, "reflect.") {
 		return true
@@ -133,9 +105,8 @@ func isInternalFrame(frame runtime.Frame) bool {
 	return false
 }
 
-// FormatError returns a formatted string representation of an error, including its message,
-// stack trace, and context if it’s an enhanced *Error.
-// Useful for logging or debugging.
+// FormatError returns a formatted string representation of an error.
+// Includes message, name, context, stack trace, and cause for *Error types; just message for others; "<nil>" if nil.
 func FormatError(err error) string {
 	if err == nil {
 		return "<nil>"
@@ -168,12 +139,12 @@ func FormatError(err error) string {
 }
 
 // Caller returns the file, line, and function name of the caller at the specified skip level.
-// Skip 0 returns the caller of this function, 1 returns its caller, etc.
+// Skip=0 returns the caller of this function, 1 returns its caller, etc.; returns "unknown" if no caller found.
 func Caller(skip int) (file string, line int, function string) {
 	configMu.RLock()
 	defer configMu.RUnlock()
 	var pcs [1]uintptr
-	n := runtime.Callers(skip+2, pcs[:])
+	n := runtime.Callers(skip+2, pcs[:]) // +2 skips Caller and its immediate caller
 	if n == 0 {
 		return "", 0, "unknown"
 	}

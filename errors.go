@@ -931,3 +931,14 @@ func WarmPool(count int) {
 		stackPool.Put(make([]uintptr, 0, currentConfig.stackDepth))
 	}
 }
+
+// WarmStackPool pre-populates the stack pool with a specified number of slices.
+// Reduces allocation overhead for stack traces; no effect if pooling is disabled.
+func WarmStackPool(count int) {
+	if currentConfig.disablePooling {
+		return
+	}
+	for i := 0; i < count; i++ {
+		stackPool.Put(make([]uintptr, 0, currentConfig.stackDepth))
+	}
+}

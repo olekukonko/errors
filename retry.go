@@ -17,6 +17,7 @@ type BackoffStrategy interface {
 type ConstantBackoff struct{}
 
 // Backoff returns the base delay regardless of the attempt number.
+// Implements BackoffStrategy with a constant delay.
 func (c ConstantBackoff) Backoff(_ int, baseDelay time.Duration) time.Duration {
 	return baseDelay
 }
@@ -25,7 +26,7 @@ func (c ConstantBackoff) Backoff(_ int, baseDelay time.Duration) time.Duration {
 type ExponentialBackoff struct{}
 
 // Backoff returns a delay that doubles with each attempt, starting from the base delay.
-// Uses bit shifting for efficient exponential growth.
+// Uses bit shifting for efficient exponential growth (e.g., baseDelay * 2^(attempt-1)).
 func (e ExponentialBackoff) Backoff(attempt int, baseDelay time.Duration) time.Duration {
 	if attempt <= 1 {
 		return baseDelay
@@ -36,35 +37,38 @@ func (e ExponentialBackoff) Backoff(attempt int, baseDelay time.Duration) time.D
 // LinearBackoff provides a linearly increasing delay for retry attempts.
 type LinearBackoff struct{}
 
-// Backoff returns a delay that increases linearly with each attempt.
+// Backoff returns a delay that increases linearly with each attempt (e.g., baseDelay * attempt).
+// Implements BackoffStrategy with linear progression.
 func (l LinearBackoff) Backoff(attempt int, baseDelay time.Duration) time.Duration {
 	return baseDelay * time.Duration(attempt)
 }
 
 // RetryOption configures a Retry instance.
+// Defines a function type for setting retry parameters.
 type RetryOption func(*Retry)
 
 // Retry represents a retryable operation with configurable backoff and retry logic.
+// Supports multiple attempts, delay strategies, jitter, and context-aware cancellation.
 type Retry struct {
-	maxAttempts int
-	delay       time.Duration    // Base delay for backoff
-	maxDelay    time.Duration    // Maximum delay cap
+	maxAttempts int              // Maximum number of attempts (including initial try)
+	delay       time.Duration    // Base delay for backoff calculations
+	maxDelay    time.Duration    // Maximum delay cap to prevent excessive waits
 	retryIf     func(error) bool // Condition to determine if retry should occur
-	onRetry     func(int, error) // Callback after each failed attempt
+	onRetry     func(int, error) // Callback executed after each failed attempt
 	backoff     BackoffStrategy  // Strategy for calculating retry delays
-	jitter      bool             // Whether to add jitter to delays
+	jitter      bool             // Whether to add random jitter to delays
 	ctx         context.Context  // Context for cancellation and deadlines
 }
 
 // NewRetry creates a new Retry instance with the given options.
-// Defaults to 3 attempts, 100ms base delay, 10s max delay, exponential backoff with jitter,
-// and retrying on IsRetryable errors from helpers.go.
+// Defaults: 3 attempts, 100ms base delay, 10s max delay, exponential backoff with jitter,
+// and retrying on IsRetryable errors; ensures retryIf is never nil.
 func NewRetry(options ...RetryOption) *Retry {
 	r := &Retry{
 		maxAttempts: 3,
 		delay:       100 * time.Millisecond,
 		maxDelay:    10 * time.Second,
-		retryIf:     func(err error) bool { return IsRetryable(err) }, // Ensure this is always set
+		retryIf:     func(err error) bool { return IsRetryable(err) },
 		onRetry:     nil,
 		backoff:     ExponentialBackoff{},
 		jitter:      true,
@@ -73,7 +77,7 @@ func NewRetry(options ...RetryOption) *Retry {
 	for _, opt := range options {
 		opt(r)
 	}
-	// Ensure retryIf is never nil
+	// Ensure retryIf is never nil, falling back to IsRetryable
 	if r.retryIf == nil {
 		r.retryIf = func(err error) bool { return IsRetryable(err) }
 	}
@@ -81,20 +85,20 @@ func NewRetry(options ...RetryOption) *Retry {
 }
 
 // addJitter adds ±25% jitter to avoid thundering herd problems.
-// Returns a duration adjusted by a random value between -25% and +25% of the input.
+// Returns a duration adjusted by a random value between -25% and +25% of the input; not thread-safe.
 func addJitter(d time.Duration) time.Duration {
 	jitter := time.Duration(rand.Int63n(int64(d/2))) - (d / 4)
 	return d + jitter
 }
 
 // Attempts returns the configured maximum number of retry attempts.
+// Includes the initial attempt in the count.
 func (r *Retry) Attempts() int {
 	return r.maxAttempts
 }
 
 // Execute runs the provided function with the configured retry logic.
-// Returns nil if the function succeeds, or the last error if all attempts fail.
-// Respects context cancellation and deadlines.
+// Returns nil on success or the last error if all attempts fail; respects context cancellation.
 func (r *Retry) Execute(fn func() error) error {
 	var lastErr error
 
@@ -104,7 +108,7 @@ func (r *Retry) Execute(fn func() error) error {
 			return nil
 		}
 
-		// Check if retry is applicable
+		// Check if retry is applicable; return immediately if not retryable
 		if r.retryIf != nil && !r.retryIf(err) {
 			return err
 		}
@@ -119,7 +123,7 @@ func (r *Retry) Execute(fn func() error) error {
 			break
 		}
 
-		// Calculate delay with backoff and cap at maxDelay
+		// Calculate delay with backoff, cap at maxDelay, and apply jitter if enabled
 		currentDelay := r.backoff.Backoff(attempt, r.delay)
 		if currentDelay > r.maxDelay {
 			currentDelay = r.maxDelay
@@ -128,7 +132,7 @@ func (r *Retry) Execute(fn func() error) error {
 			currentDelay = addJitter(currentDelay)
 		}
 
-		// Respect context cancellation or wait for delay
+		// Wait with respect to context cancellation or timeout
 		select {
 		case <-r.ctx.Done():
 			return r.ctx.Err()
@@ -139,7 +143,7 @@ func (r *Retry) Execute(fn func() error) error {
 }
 
 // Transform creates a new Retry instance with modified configuration.
-// It copies all settings from the original Retry and applies the given options.
+// Copies all settings from the original Retry and applies the given options.
 func (r *Retry) Transform(opts ...RetryOption) *Retry {
 	newRetry := &Retry{
 		maxAttempts: r.maxAttempts,
@@ -158,7 +162,7 @@ func (r *Retry) Transform(opts ...RetryOption) *Retry {
 }
 
 // WithBackoff sets the backoff strategy using the BackoffStrategy interface.
-// Returns a RetryOption for use with NewRetry.
+// Returns a RetryOption; no-op if strategy is nil, retaining the existing strategy.
 func WithBackoff(strategy BackoffStrategy) RetryOption {
 	return func(r *Retry) {
 		if strategy != nil {
@@ -168,7 +172,7 @@ func WithBackoff(strategy BackoffStrategy) RetryOption {
 }
 
 // WithContext sets the context for cancellation and deadlines.
-// Returns a RetryOption for use with NewRetry; defaults to context.Background if nil.
+// Returns a RetryOption; retains context.Background if ctx is nil.
 func WithContext(ctx context.Context) RetryOption {
 	return func(r *Retry) {
 		if ctx != nil {
@@ -178,7 +182,7 @@ func WithContext(ctx context.Context) RetryOption {
 }
 
 // WithDelay sets the initial delay between retries.
-// Returns a RetryOption for use with NewRetry; ensures non-negative delay.
+// Returns a RetryOption; ensures non-negative delay by setting negatives to 0.
 func WithDelay(delay time.Duration) RetryOption {
 	return func(r *Retry) {
 		if delay < 0 {
@@ -189,7 +193,7 @@ func WithDelay(delay time.Duration) RetryOption {
 }
 
 // WithJitter enables or disables jitter in the backoff delay.
-// Returns a RetryOption for use with NewRetry.
+// Returns a RetryOption; toggles random delay variation.
 func WithJitter(jitter bool) RetryOption {
 	return func(r *Retry) {
 		r.jitter = jitter
@@ -197,7 +201,7 @@ func WithJitter(jitter bool) RetryOption {
 }
 
 // WithMaxAttempts sets the maximum number of retry attempts.
-// Returns a RetryOption for use with NewRetry; ensures at least 1 attempt.
+// Returns a RetryOption; ensures at least 1 attempt by adjusting lower values.
 func WithMaxAttempts(maxAttempts int) RetryOption {
 	return func(r *Retry) {
 		if maxAttempts < 1 {
@@ -208,7 +212,7 @@ func WithMaxAttempts(maxAttempts int) RetryOption {
 }
 
 // WithMaxDelay sets the maximum delay between retries.
-// Returns a RetryOption for use with NewRetry; ensures non-negative delay.
+// Returns a RetryOption; ensures non-negative delay by setting negatives to 0.
 func WithMaxDelay(maxDelay time.Duration) RetryOption {
 	return func(r *Retry) {
 		if maxDelay < 0 {
@@ -219,7 +223,7 @@ func WithMaxDelay(maxDelay time.Duration) RetryOption {
 }
 
 // WithOnRetry sets a callback to execute after each failed attempt.
-// Returns a RetryOption for use with NewRetry.
+// Returns a RetryOption; callback receives attempt number and error.
 func WithOnRetry(onRetry func(attempt int, err error)) RetryOption {
 	return func(r *Retry) {
 		r.onRetry = onRetry
@@ -227,7 +231,7 @@ func WithOnRetry(onRetry func(attempt int, err error)) RetryOption {
 }
 
 // WithRetryIf sets the condition under which to retry.
-// Returns a RetryOption for use with NewRetry; defaults to IsRetryable if nil.
+// Returns a RetryOption; retains IsRetryable default if retryIf is nil.
 func WithRetryIf(retryIf func(error) bool) RetryOption {
 	return func(r *Retry) {
 		if retryIf != nil {
@@ -237,8 +241,7 @@ func WithRetryIf(retryIf func(error) bool) RetryOption {
 }
 
 // ExecuteReply runs the provided function with retry logic and returns its result.
-// Returns the function's result and nil error on success, or the last error on failure.
-// Type parameter T allows for generic return values.
+// Returns the result and nil on success, or zero value and last error on failure; generic type T.
 func ExecuteReply[T any](r *Retry, fn func() (T, error)) (T, error) {
 	var lastErr error
 	var zero T
@@ -249,6 +252,7 @@ func ExecuteReply[T any](r *Retry, fn func() (T, error)) (T, error) {
 			return result, nil
 		}
 
+		// Check if retry is applicable; return immediately if not retryable
 		if r.retryIf != nil && !r.retryIf(err) {
 			return zero, err
 		}
@@ -262,6 +266,7 @@ func ExecuteReply[T any](r *Retry, fn func() (T, error)) (T, error) {
 			break
 		}
 
+		// Calculate delay with backoff, cap at maxDelay, and apply jitter if enabled
 		currentDelay := r.backoff.Backoff(attempt, r.delay)
 		if currentDelay > r.maxDelay {
 			currentDelay = r.maxDelay
@@ -270,6 +275,7 @@ func ExecuteReply[T any](r *Retry, fn func() (T, error)) (T, error) {
 			currentDelay = addJitter(currentDelay)
 		}
 
+		// Wait with respect to context cancellation or timeout
 		select {
 		case <-r.ctx.Done():
 			return zero, r.ctx.Err()
