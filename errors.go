@@ -184,32 +184,45 @@ func (e *Error) As(target interface{}) bool {
 	if e == nil {
 		return false
 	}
-	if targetPtr, ok := target.(**Error); ok {
-		// Traverse the chain to find the deepest named *Error
+	// Handle *Error target (for stderrors.As compatibility)
+	if targetPtr, ok := target.(*Error); ok {
 		current := e
 		for current != nil {
 			if current.name != "" {
-				*targetPtr = current
+				*targetPtr = *current
 				return true
-			}
-			if current.cause == nil {
-				break
 			}
 			if next, ok := current.cause.(*Error); ok {
 				current = next
+			} else if current.cause != nil {
+				return errors.As(current.cause, target)
+			} else {
+				return false
+			}
+		}
+		return false
+	}
+	// Handle *error target - unwrap to innermost error
+	if targetErr, ok := target.(*error); ok {
+		innermost := error(e)
+		current := error(e)
+		for current != nil {
+			if err, ok := current.(*Error); ok && err.cause != nil {
+				current = err.cause
+				innermost = current
 			} else {
 				break
 			}
 		}
-		// If no named error found, assign the original error
-		*targetPtr = e
+		*targetErr = innermost
 		return true
 	}
-	// For non-**Error targets, delegate to cause
+
+	// Delegate to cause for other types
 	if e.cause != nil {
 		return errors.As(e.cause, target)
 	}
-	return false // If no cause, this error doesn't match non-**Error targets
+	return false
 }
 
 // Callback sets a function to be called when Error() is invoked.
@@ -745,6 +758,7 @@ func (e *Error) Unwrap() error {
 
 // UnwrapAll returns a slice of all errors in the chain, starting with this error.
 // Traverses both Unwrap() and Cause() chains.
+// In the core error implementation (second document):
 func (e *Error) UnwrapAll() []error {
 	if e == nil {
 		return nil
@@ -752,36 +766,34 @@ func (e *Error) UnwrapAll() []error {
 	var chain []error
 	current := error(e)
 	for current != nil {
-		if e, ok := current.(*Error); ok {
-			// Create a copy with only this error's message and metadata
+		if err, ok := current.(*Error); ok {
 			isolated := newError()
-			isolated.msg = e.msg
-			isolated.name = e.name
-			isolated.template = e.template
-			isolated.code = e.code
-			isolated.category = e.category
-			// Copy context
-			if e.smallCount > 0 {
-				isolated.smallCount = e.smallCount
-				for i := int32(0); i < e.smallCount; i++ {
-					isolated.smallContext[i] = e.smallContext[i]
+			isolated.msg = err.msg
+			isolated.name = err.name
+			isolated.template = err.template
+			isolated.code = err.code
+			isolated.category = err.category
+			if err.smallCount > 0 {
+				isolated.smallCount = err.smallCount
+				for i := int32(0); i < err.smallCount; i++ {
+					isolated.smallContext[i] = err.smallContext[i]
 				}
 			}
-			if e.context != nil {
-				isolated.context = make(map[string]interface{}, len(e.context))
-				for k, v := range e.context {
+			if err.context != nil {
+				isolated.context = make(map[string]interface{}, len(err.context))
+				for k, v := range err.context {
 					isolated.context[k] = v
 				}
 			}
-			if e.stack != nil {
-				isolated.stack = append([]uintptr(nil), e.stack...)
+			if err.stack != nil {
+				isolated.stack = append([]uintptr(nil), err.stack...)
 			}
 			chain = append(chain, isolated)
 		} else {
 			chain = append(chain, current)
 		}
-		if unwrappable, ok := current.(interface{ Unwrap() error }); ok {
-			current = unwrappable.Unwrap()
+		if unwrapper, ok := current.(interface{ Unwrap() error }); ok {
+			current = unwrapper.Unwrap()
 		} else {
 			break
 		}

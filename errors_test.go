@@ -559,13 +559,25 @@ func TestExampleOutput(t *testing.T) {
 
 // TestFullErrorChain builds an error chain and verifies the custom and standard
 // behavior of Is and As (for *Error targets) as well as UnwrapAll.
-// In the test document (first document):
 func TestFullErrorChain(t *testing.T) {
 	stdErr := errors.New("file not found")
 	authErr := Named("AuthError").WithCode(401)
 	storageErr := Wrapf(stdErr, "storage failed")
 	authErrWrapped := Wrap(storageErr, authErr)
 	wrapped := Wrapf(authErrWrapped, "request failed")
+
+	// Test stderrors.As assigns the top-level error
+	var targetAuth *Error
+	expectedTopLevelMsg := "request failed: AuthError: storage failed: file not found"
+	if !errors.As(wrapped, &targetAuth) || targetAuth.Error() != expectedTopLevelMsg {
+		t.Errorf("stderrors.As(wrapped, &targetAuth) failed, got %v, want %q", targetAuth.Error(), expectedTopLevelMsg)
+	}
+
+	// Test custom As for named error traversal
+	var targetAuthPtr *Error
+	if !As(wrapped, &targetAuthPtr) || targetAuthPtr.Name() != "AuthError" || targetAuthPtr.Code() != 401 {
+		t.Errorf("As(wrapped, &targetAuthPtr) failed, got name=%s, code=%d; want AuthError, 401", targetAuthPtr.Name(), targetAuthPtr.Code())
+	}
 
 	// --- Test Is ---
 	if !Is(wrapped, authErr) {
@@ -581,15 +593,6 @@ func TestFullErrorChain(t *testing.T) {
 		t.Errorf("stderrors.Is(wrapped, stdErr) failed, expected true")
 	}
 
-	// --- Test As for *Error target ---
-	var targetAuth *Error
-	if !As(wrapped, &targetAuth) || targetAuth.Name() != "AuthError" || targetAuth.Code() != 401 {
-		t.Errorf("As(wrapped, &targetAuth) failed, got name=%s, code=%d; want AuthError, 401", targetAuth.Name(), targetAuth.Code())
-	}
-	if !errors.As(wrapped, &targetAuth) || targetAuth.Name() != "AuthError" || targetAuth.Code() != 401 {
-		t.Errorf("stderrors.As(wrapped, &targetAuth) failed, got name=%s, code=%d; want AuthError, 401", targetAuth.Name(), targetAuth.Code())
-	}
-
 	// --- Test UnwrapAll ---
 	chain := UnwrapAll(wrapped)
 	if len(chain) != 4 {
@@ -597,8 +600,8 @@ func TestFullErrorChain(t *testing.T) {
 	}
 	expected := []string{
 		"request failed",
-		"storage failed",
 		"AuthError",
+		"storage failed",
 		"file not found",
 	}
 	for i, err := range chain {

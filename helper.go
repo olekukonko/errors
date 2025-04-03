@@ -11,9 +11,16 @@ import (
 // As wraps errors.As, using custom type assertion for *Error types.
 // Falls back to standard errors.As for non-*Error types.
 func As(err error, target interface{}) bool {
+	if err == nil || target == nil {
+		return false
+	}
+
+	// First try our custom *Error handling
 	if e, ok := err.(*Error); ok {
 		return e.As(target)
 	}
+
+	// Fall back to standard errors.As
 	return errors.As(err, target)
 }
 
@@ -372,8 +379,10 @@ func Wrap(err error, wrapper *Error) *Error {
 	if wrapper == nil {
 		wrapper = newError()
 	}
-	wrapper.cause = err
-	return wrapper
+	newErr := wrapper.Copy()
+	newErr.cause = err
+	fmt.Printf("Wrap: created newErr %p, msg=%q, name=%q, code=%d, cause=%p\n", newErr, newErr.msg, newErr.name, newErr.code, newErr.cause)
+	return newErr
 }
 
 // Wrapf creates a new formatted error that wraps another error.
