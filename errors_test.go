@@ -1,6 +1,7 @@
 package errors
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -192,7 +193,10 @@ func TestCode(t *testing.T) {
 
 // TestMarshalJSON ensures JSON serialization includes all expected fields.
 func TestMarshalJSON(t *testing.T) {
-	err := New("test").With("key", "value").Wrap(Named("cause"))
+	err := New("test").
+		With("key", "value").
+		WithCode(400). // Add code
+		Wrap(Named("cause"))
 	defer err.Free()
 	data, e := json.Marshal(err)
 	if e != nil {
@@ -203,6 +207,7 @@ func TestMarshalJSON(t *testing.T) {
 		"message": "test",
 		"context": map[string]interface{}{"key": "value"},
 		"cause":   map[string]interface{}{"name": "cause"},
+		"code":    float64(400), // JSON numbers are float64 by default
 	}
 	var got map[string]interface{}
 	if err := json.Unmarshal(data, &got); err != nil {
@@ -218,6 +223,28 @@ func TestMarshalJSON(t *testing.T) {
 	if cause, ok := got["cause"].(map[string]interface{}); !ok || cause["name"] != "cause" {
 		t.Errorf("MarshalJSON() cause = %v, want %v", got["cause"], want["cause"])
 	}
+	if code, ok := got["code"].(float64); !ok || code != 400 {
+		t.Errorf("MarshalJSON() code = %v, want %v", got["code"], 400)
+	}
+
+	t.Run("WithStack", func(t *testing.T) {
+		err := New("test").WithStack().WithCode(500)
+		defer err.Free()
+		data, e := json.Marshal(err)
+		if e != nil {
+			t.Fatalf("MarshalJSON() failed: %v", e)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if _, ok := got["stack"].([]interface{}); !ok || len(got["stack"].([]interface{})) == 0 {
+			t.Error("MarshalJSON() should include non-empty stack")
+		}
+		if code, ok := got["code"].(float64); !ok || code != 500 {
+			t.Errorf("MarshalJSON() code = %v, want 500", got["code"])
+		}
+	})
 }
 
 // TestEdgeCases verifies behavior in unusual scenarios.
@@ -300,29 +327,42 @@ func TestStackDepth(t *testing.T) {
 
 func TestTransform(t *testing.T) {
 	t.Run("NilError", func(t *testing.T) {
-		if Transform(nil, func(e *Error) {}) != nil {
-			t.Error("Should handle nil error")
+		result := Transform(nil, func(e *Error) {})
+		if result != nil {
+			t.Error("Should return nil for nil input")
 		}
 	})
 
 	t.Run("NonErrorType", func(t *testing.T) {
 		stdErr := errors.New("standard")
-		if Transform(stdErr, func(e *Error) {}) != stdErr {
-			t.Error("Should return non-*Error unchanged")
+		transformed := Transform(stdErr, func(e *Error) {})
+		if transformed == nil {
+			t.Error("Should not return nil for non-nil input")
+		}
+		if transformed.Error() != "standard" {
+			t.Errorf("Should preserve original message, got %q, want %q", transformed.Error(), "standard")
+		}
+		if transformed == stdErr {
+			t.Error("Should return a new *Error, not the original")
 		}
 	})
 
 	t.Run("TransformError", func(t *testing.T) {
 		orig := New("original")
+		defer orig.Free()
 		transformed := Transform(orig, func(e *Error) {
 			e.With("key", "value")
-		}).(*Error)
+		})
+		defer transformed.Free()
 
 		if transformed == orig {
-			t.Error("Should return a copy")
+			t.Error("Should return a copy, not the original")
+		}
+		if transformed.Error() != "original" {
+			t.Errorf("Should preserve original message, got %q, want %q", transformed.Error(), "original")
 		}
 		if transformed.Context()["key"] != "value" {
-			t.Error("Should apply transformations")
+			t.Error("Should apply transformations, context missing 'key'='value'")
 		}
 	})
 }
@@ -737,4 +777,41 @@ func TestPackageIsNull(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFromContext(t *testing.T) {
+	t.Run("nil error returns nil", func(t *testing.T) {
+		ctx := context.Background()
+		if FromContext(ctx, nil) != nil {
+			t.Error("Expected nil for nil input error")
+		}
+	})
+
+	t.Run("deadline exceeded", func(t *testing.T) {
+		deadline := time.Now().Add(-1 * time.Hour) // Past deadline
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		defer cancel()
+
+		err := errors.New("operation failed")
+		cerr := FromContext(ctx, err)
+
+		if !IsTimeout(cerr) {
+			t.Error("Expected timeout error")
+		}
+		if !HasContextKey(cerr, "deadline") {
+			t.Error("Expected deadline in context")
+		}
+	})
+
+	t.Run("cancelled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		err := errors.New("operation failed")
+		cerr := FromContext(ctx, err)
+
+		if !HasContextKey(cerr, "cancelled") {
+			t.Error("Expected cancelled flag")
+		}
+	})
 }

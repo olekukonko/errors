@@ -635,6 +635,7 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 		Context map[string]interface{} `json:"context,omitempty"`
 		Cause   interface{}            `json:"cause,omitempty"`
 		Stack   []string               `json:"stack,omitempty"`
+		Code    int                    `json:"code,omitempty"` // Add code field
 	}
 
 	var ctx map[string]interface{}
@@ -654,6 +655,7 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 		Name:    e.name,
 		Message: e.msg,
 		Context: ctx,
+		Code:    e.Code(), // Include the status code
 	}
 
 	if e.stack != nil {

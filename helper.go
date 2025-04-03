@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // As wraps errors.As, using custom type assertion for *Error types.
@@ -109,15 +110,31 @@ func From(err error) *Error {
 }
 
 // FromContext creates an error from a context and an existing error.
+// Adds context information including:
+// - Timeout status and deadline (if applicable)
+// - Cancellation status
+// - Context values (optional)
+// Returns nil if input error is nil.
+// FromContext creates an error from a context and an existing error.
 // Adds timeout info if applicable; returns nil if input error is nil.
 func FromContext(ctx context.Context, err error) *Error {
 	if err == nil {
 		return nil
 	}
+
 	e := New(err.Error())
-	if ctx.Err() == context.DeadlineExceeded {
+
+	// Handle context errors
+	switch ctx.Err() {
+	case context.DeadlineExceeded:
 		e.WithTimeout()
+		if deadline, ok := ctx.Deadline(); ok {
+			e.With("deadline", deadline.Format(time.RFC3339))
+		}
+	case context.Canceled:
+		e.With("cancelled", true)
 	}
+
 	return e
 }
 
@@ -301,14 +318,19 @@ func Stack(err error) []string {
 
 // Transform applies transformations to an error if it's an *Error.
 // Returns a new transformed error or the original if no changes are needed.
-func Transform(err error, fn func(*Error)) error {
-	if err == nil || fn == nil {
-		return err
+func Transform(err error, fn func(*Error)) *Error {
+	if err == nil {
+		return nil
 	}
 	if e, ok := err.(*Error); ok {
-		return e.Transform(fn)
+		newErr := e.Copy()
+		fn(newErr)
+		return newErr
 	}
-	return err
+	// If not an *Error, create a new one and transform it
+	newErr := New(err.Error())
+	fn(newErr)
+	return newErr
 }
 
 // Unwrap returns the result of calling the Unwrap method on err, if err's

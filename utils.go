@@ -3,6 +3,7 @@
 package errors
 
 import (
+	"database/sql"
 	"fmt"
 	"reflect"
 	"runtime"
@@ -67,13 +68,35 @@ func clearMap(m map[string]interface{}) {
 // Helper function to detect sql.Null types
 func sqlNull(v interface{}) bool {
 	if v == nil {
-		return false
+		fmt.Println("sqlNull: nil value, returning true")
+		return true
 	}
 
-	if null, ok := v.(interface{ Valid() bool }); ok {
-		return null.Valid()
+	switch val := v.(type) {
+	case sql.NullString:
+		result := !val.Valid
+		fmt.Printf("sqlNull: NullString, value=%v, valid=%v, returning %v\n", val, val.Valid, result)
+		return result
+	case sql.NullTime:
+		result := !val.Valid
+		fmt.Printf("sqlNull: NullTime, value=%v, valid=%v, returning %v\n", val, val.Valid, result)
+		return result
+	case sql.NullInt64:
+		result := !val.Valid
+		fmt.Printf("sqlNull: NullInt64, value=%v, valid=%v, returning %v\n", val, val.Valid, result)
+		return result
+	case sql.NullBool:
+		result := !val.Valid
+		fmt.Printf("sqlNull: NullBool, value=%v, valid=%v, returning %v\n", val, val.Valid, result)
+		return result
+	case sql.NullFloat64:
+		result := !val.Valid
+		fmt.Printf("sqlNull: NullFloat64, value=%v, valid=%v, returning %v\n", val, val.Valid, result)
+		return result
+	default:
+		fmt.Printf("sqlNull: unknown type, value=%v, returning false\n", v)
+		return false
 	}
-	return false
 }
 
 // getFuncName extracts the function name from an interface, typically a function or method.
