@@ -10,6 +10,7 @@ import (
 
 // As wraps errors.As, using custom type assertion for *Error types.
 // Falls back to standard errors.As for non-*Error types.
+// Returns false if either err or target is nil.
 func As(err error, target interface{}) bool {
 	if err == nil || target == nil {
 		return false
@@ -44,6 +45,7 @@ func Context(err error) map[string]interface{} {
 
 // Convert transforms any error into an *Error, preserving its message and wrapping it if needed.
 // Returns nil if the input is nil; returns the original if already an *Error.
+// Uses multiple strategies: direct assertion, errors.As, manual unwrapping, and fallback creation.
 func Convert(err error) *Error {
 	if err == nil {
 		return nil
@@ -68,7 +70,7 @@ func Convert(err error) *Error {
 		unwrapped = errors.Unwrap(unwrapped)
 	}
 
-	// Final fallback: create new error
+	// Final fallback: create new error with original message and wrap it
 	return New(err.Error()).Wrap(err)
 }
 
@@ -82,7 +84,7 @@ func Count(err error) uint64 {
 }
 
 // Find searches the error chain for the first error matching pred.
-// Returns nil if no match is found; traverses both Unwrap() and Cause() chains.
+// Returns nil if no match is found or pred is nil; traverses both Unwrap() and Cause() chains.
 func Find(err error, pred func(error) bool) error {
 	for current := err; current != nil; {
 		if pred(current) {
@@ -103,20 +105,14 @@ func Find(err error, pred func(error) bool) error {
 }
 
 // From transforms any error into an *Error, preserving its message and wrapping it if needed.
-// Returns nil if the input is nil; returns the original if already an *Error.
-// alias of Convert
+// Alias of Convert; returns nil if input is nil, original if already an *Error.
 func From(err error) *Error {
 	return Convert(err)
 }
 
-// FromContext creates an error from a context and an existing error.
-// Adds context information including:
-// - Timeout status and deadline (if applicable)
-// - Cancellation status
-// - Context values (optional)
-// Returns nil if input error is nil.
-// FromContext creates an error from a context and an existing error.
-// Adds timeout info if applicable; returns nil if input error is nil.
+// FromContext creates an *Error from a context and an existing error.
+// Enhances the error with context info: timeout status, deadline, or cancellation.
+// Returns nil if input error is nil; does not store context values directly.
 func FromContext(ctx context.Context, err error) *Error {
 	if err == nil {
 		return nil
@@ -139,7 +135,7 @@ func FromContext(ctx context.Context, err error) *Error {
 }
 
 // Category returns the category of an error, if it is an *Error.
-// Returns an empty string for non-*Error types.
+// Returns an empty string for non-*Error types or unset categories.
 func Category(err error) string {
 	if e, ok := err.(*Error); ok {
 		return e.category
@@ -148,7 +144,7 @@ func Category(err error) string {
 }
 
 // Has checks if an error contains meaningful content.
-// Returns true for non-nil standard errors or *Error with content.
+// Returns true for non-nil standard errors or *Error with content (msg, name, template, or cause).
 func Has(err error) bool {
 	if e, ok := err.(*Error); ok {
 		return e.Has()
@@ -157,7 +153,7 @@ func Has(err error) bool {
 }
 
 // HasContextKey checks if the error's context contains the specified key.
-// Returns false for non-*Error types or if the key is not present.
+// Returns false for non-*Error types or if the key is not present in the context.
 func HasContextKey(err error, key string) bool {
 	if e, ok := err.(*Error); ok {
 		ctx := e.Context()
@@ -170,7 +166,7 @@ func HasContextKey(err error, key string) bool {
 }
 
 // Is wraps errors.Is, using custom matching for *Error types.
-// Falls back to standard errors.Is for non-*Error types.
+// Falls back to standard errors.Is for non-*Error types; returns true if err equals target.
 func Is(err, target error) bool {
 	if err == nil || target == nil {
 		return err == target
@@ -185,13 +181,14 @@ func Is(err, target error) bool {
 }
 
 // IsError checks if an error is an instance of *Error.
-// Returns true only for this package's custom error type.
+// Returns true only for this package's custom error type; false for nil or other types.
 func IsError(err error) bool {
 	_, ok := err.(*Error)
 	return ok
 }
 
-// IsEmpty checks if an error has no meaningful content
+// IsEmpty checks if an error has no meaningful content.
+// Returns true for nil errors, empty *Error instances, or standard errors with whitespace-only messages.
 func IsEmpty(err error) bool {
 	if err == nil {
 		return true
@@ -202,22 +199,21 @@ func IsEmpty(err error) bool {
 	return strings.TrimSpace(err.Error()) == ""
 }
 
-// IsNull checks if an error is nil or represents a NULL value
+// IsNull checks if an error is nil or represents a NULL value.
+// Delegates to *Error’s IsNull for custom errors; uses sqlNull for others.
 func IsNull(err error) bool {
 	if err == nil {
 		return true
 	}
 	if e, ok := err.(*Error); ok {
-		result := e.IsNull()
-		return result
+		return e.IsNull()
 	}
-	result := sqlNull(err)
-	// fmt.Printf("Package IsNull: non-*Error, result=%v (err=%v)\n", result, err)
-	return result
+	return sqlNull(err)
 }
 
 // IsRetryable checks if an error is retryable.
-// For *Error, checks the context; otherwise, infers from timeout or "retry" in the message.
+// For *Error, checks context for retry flag; for others, looks for "retry" or timeout in message.
+// Returns false for nil errors; thread-safe for *Error types.
 func IsRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -245,7 +241,8 @@ func IsRetryable(err error) bool {
 }
 
 // IsTimeout checks if an error indicates a timeout.
-// For *Error, checks the context; otherwise, inspects the error string for "timeout".
+// For *Error, checks context for timeout flag; for others, looks for "timeout" in message.
+// Returns false for nil errors.
 func IsTimeout(err error) bool {
 	if err == nil {
 		return false
@@ -259,7 +256,7 @@ func IsTimeout(err error) bool {
 }
 
 // Merge combines multiple errors into a single *Error.
-// Aggregates messages, contexts, and stacks; returns nil if no errors provided.
+// Aggregates messages with "; " separator, merges contexts and stacks; returns nil if no errors provided.
 func Merge(errs ...error) *Error {
 	if len(errs) == 0 {
 		return nil
@@ -294,7 +291,7 @@ func Merge(errs ...error) *Error {
 }
 
 // Name returns the name of an error, if it is an *Error.
-// Returns an empty string for non-*Error types.
+// Returns an empty string for non-*Error types or unset names.
 func Name(err error) string {
 	if e, ok := err.(*Error); ok {
 		return e.name
@@ -327,8 +324,8 @@ func Stack(err error) []string {
 	return nil
 }
 
-// Transform applies transformations to an error if it's an *Error.
-// Returns a new transformed error or the original if no changes are needed.
+// Transform applies transformations to an error, returning a new *Error.
+// Creates a new *Error from non-*Error types before applying fn; returns nil if err is nil.
 func Transform(err error, fn func(*Error)) *Error {
 	if err == nil {
 		return nil
@@ -344,8 +341,8 @@ func Transform(err error, fn func(*Error)) *Error {
 	return newErr
 }
 
-// Unwrap returns the result of calling the Unwrap method on err, if err's
-// type contains an Unwrap method returning error.
+// Unwrap returns the underlying cause of an error, if it implements Unwrap.
+// For *Error, returns cause; for others, returns the error itself; nil if err is nil.
 func Unwrap(err error) error {
 	for current := err; current != nil; {
 		if e, ok := current.(*Error); ok {
@@ -361,7 +358,7 @@ func Unwrap(err error) error {
 }
 
 // Walk traverses the error chain, applying fn to each error.
-// Works with both *Error and standard error chains via Unwrap() or Cause().
+// Supports both Unwrap() and Cause() interfaces; stops at nil or non-unwrappable errors.
 func Walk(err error, fn func(error)) {
 	for current := err; current != nil; {
 		fn(current)
@@ -379,7 +376,7 @@ func Walk(err error, fn func(error)) {
 }
 
 // With adds a key-value pair to an error's context, if it is an *Error.
-// Returns the original error unchanged if not an *Error.
+// Returns the original error unchanged if not an *Error; no-op for non-*Error types.
 func With(err error, key string, value interface{}) error {
 	if e, ok := err.(*Error); ok {
 		return e.With(key, value)
@@ -387,8 +384,8 @@ func With(err error, key string, value interface{}) error {
 	return err
 }
 
-// WithStack converts any error to *Error and captures stack trace
-// If input is nil, returns nil. If already *Error, adds stack trace.
+// WithStack converts any error to an *Error and captures a stack trace.
+// Returns nil if input is nil; adds stack to existing *Error or wraps non-*Error types.
 func WithStack(err error) *Error {
 	if err == nil {
 		return nil
@@ -399,8 +396,8 @@ func WithStack(err error) *Error {
 	return New(err.Error()).WithStack().Wrap(err)
 }
 
-// Wrap creates a new error that wraps another error with additional context.
-// It accepts either a *Error, an error, or a string as its wrapper.
+// Wrap creates a new *Error that wraps another error with additional context.
+// Uses a copy of the provided wrapper *Error; returns nil if err is nil.
 func Wrap(err error, wrapper *Error) *Error {
 	if err == nil {
 		return nil
@@ -410,12 +407,11 @@ func Wrap(err error, wrapper *Error) *Error {
 	}
 	newErr := wrapper.Copy()
 	newErr.cause = err
-	// fmt.Printf("Wrap: created newErr %p, msg=%q, name=%q, code=%d, cause=%p\n", newErr, newErr.msg, newErr.name, newErr.code, newErr.cause)
 	return newErr
 }
 
-// Wrapf creates a new formatted error that wraps another error.
-// It ensures the cause is properly chained in the error hierarchy.
+// Wrapf creates a new formatted *Error that wraps another error.
+// Formats the message and sets the cause; returns nil if err is nil.
 func Wrapf(err error, format string, args ...interface{}) *Error {
 	if err == nil {
 		return nil
