@@ -9,6 +9,7 @@ import (
 )
 
 // MultiError represents a thread-safe collection of errors with enhanced features.
+// Supports limits, sampling, and custom formatting for error aggregation.
 type MultiError struct {
 	errors []error
 	mu     sync.RWMutex
@@ -22,6 +23,7 @@ type MultiError struct {
 }
 
 // ErrorFormatter defines a function for custom error message formatting.
+// Takes a slice of errors and returns a single formatted string.
 type ErrorFormatter func([]error) string
 
 // MultiErrorOption configures MultiError behavior during creation.
@@ -42,7 +44,7 @@ func NewMultiError(opts ...MultiErrorOption) *MultiError {
 }
 
 // Add appends an error to the collection with optional sampling, limit checks, and duplicate prevention.
-// Ignores nil errors and duplicates; thread-safe.
+// Ignores nil errors and duplicates based on string equality; thread-safe.
 func (m *MultiError) Add(err error) {
 	if err == nil {
 		return
@@ -51,14 +53,14 @@ func (m *MultiError) Add(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check for duplicates
+	// Check for duplicates by comparing error messages
 	for _, e := range m.errors {
 		if e.Error() == err.Error() {
 			return
 		}
 	}
 
-	// Apply sampling
+	// Apply sampling if enabled and collection isn’t empty
 	if m.sampling && len(m.errors) > 0 {
 		var r uint32
 		if m.rand != nil {
@@ -66,12 +68,12 @@ func (m *MultiError) Add(err error) {
 		} else {
 			r = fastRand() % 100
 		}
-		if r > m.sampleRate { // Changed from >= to > to match percentage
+		if r > m.sampleRate { // Accept if random value is within sample rate
 			return
 		}
 	}
 
-	// Apply limit
+	// Respect limit if set
 	if m.limit > 0 && len(m.errors) >= m.limit {
 		return
 	}
@@ -96,8 +98,8 @@ func (m *MultiError) Count() int {
 }
 
 // Error returns a formatted string representation of the errors.
-// Returns an empty string if no errors, the single error's message if one exists,
-// or a formatted list using the custom formatter or default format if multiple.
+// Returns empty string if no errors, single error message if one exists,
+// or a formatted list using custom formatter or default if multiple; thread-safe.
 func (m *MultiError) Error() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -115,7 +117,7 @@ func (m *MultiError) Error() string {
 	}
 }
 
-// Errors returns a copy of the contained Historic.
+// Errors returns a copy of the contained errors.
 // Thread-safe; returns nil if no errors exist.
 func (m *MultiError) Errors() []error {
 	m.mu.RLock()
@@ -130,7 +132,7 @@ func (m *MultiError) Errors() []error {
 }
 
 // Filter returns a new MultiError containing only errors that match the predicate.
-// Thread-safe; preserves original configuration, including sampling behavior.
+// Thread-safe; preserves original configuration including limit, formatter, and sampling.
 func (m *MultiError) Filter(fn func(error) bool) *MultiError {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -184,7 +186,7 @@ func (m *MultiError) Last() error {
 }
 
 // Merge combines another MultiError's errors into this one.
-// Thread-safe; respects limit and sampling settings.
+// Thread-safe; respects this instance’s limit and sampling settings; no-op if other is nil or empty.
 func (m *MultiError) Merge(other *MultiError) {
 	if other == nil || !other.Has() {
 		return
@@ -198,50 +200,41 @@ func (m *MultiError) Merge(other *MultiError) {
 	}
 }
 
+// IsNull checks if the MultiError is empty or contains only null errors.
+// Returns true if empty or all errors are null (via IsNull() or empty message); thread-safe.
 func (m *MultiError) IsNull() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	fmt.Printf("MultiError.IsNull: checking %d errors\n", len(m.errors))
-
 	// Fast path for empty MultiError
 	if len(m.errors) == 0 {
-		fmt.Println("MultiError.IsNull: empty, returning true")
 		return true
 	}
 
-	// Check each error
+	// Check each error for null status
 	allNull := true
-	for i, err := range m.errors {
-		fmt.Printf("MultiError.IsNull: checking error %d: %v\n", i, err)
+	for _, err := range m.errors {
 		switch e := err.(type) {
 		case interface{ IsNull() bool }:
-			isNull := e.IsNull()
-			fmt.Printf("MultiError.IsNull: error %d has IsNull(), result=%v\n", i, isNull)
-			if !isNull {
+			if !e.IsNull() {
 				allNull = false
 				break
 			}
 		case nil:
-			fmt.Printf("MultiError.IsNull: error %d is nil\n", i)
 			continue
 		default:
-			hasContent := e.Error() != ""
-			fmt.Printf("MultiError.IsNull: error %d default check, hasContent=%v\n", i, hasContent)
-			if hasContent {
+			if e.Error() != "" {
 				allNull = false
 				break
 			}
 		}
 	}
-
-	fmt.Printf("MultiError.IsNull: allNull=%v\n", allNull)
 	return allNull
 }
 
 // Single returns nil if the collection is empty, the single error if only one exists,
 // or the MultiError itself if multiple errors are present.
-// Thread-safe.
+// Thread-safe; useful for unwrapping to a single error when possible.
 func (m *MultiError) Single() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -257,19 +250,19 @@ func (m *MultiError) Single() error {
 }
 
 // String implements the Stringer interface for a concise string representation.
-// Thread-safe; uses the same logic as Error().
+// Thread-safe; delegates to Error() for formatting.
 func (m *MultiError) String() string {
 	return m.Error()
 }
 
 // Unwrap returns a copy of the contained errors for multi-error unwrapping.
-// Implements the errors.Unwrap interface for compatibility; thread-safe.
+// Implements the errors.Unwrap interface; thread-safe; returns nil if empty.
 func (m *MultiError) Unwrap() []error {
 	return m.Errors()
 }
 
 // WithFormatter sets a custom error formatting function.
-// Returns a MultiErrorOption for use with NewMultiError.
+// Returns a MultiErrorOption for use with NewMultiError; overrides default formatting.
 func WithFormatter(f ErrorFormatter) MultiErrorOption {
 	return func(m *MultiError) {
 		m.formatter = f
@@ -277,7 +270,7 @@ func WithFormatter(f ErrorFormatter) MultiErrorOption {
 }
 
 // WithLimit sets the maximum number of errors to store.
-// Returns a MultiErrorOption for use with NewMultiError; 0 means unlimited.
+// Returns a MultiErrorOption for use with NewMultiError; 0 means unlimited, negative values are ignored.
 func WithLimit(n int) MultiErrorOption {
 	return func(m *MultiError) {
 		if n < 0 {
@@ -288,7 +281,7 @@ func WithLimit(n int) MultiErrorOption {
 }
 
 // WithSampling enables error sampling with a specified rate (1-100).
-// Returns a MultiErrorOption for use with NewMultiError; caps rate at 100.
+// Returns a MultiErrorOption for use with NewMultiError; caps rate at 100 for validity.
 func WithSampling(rate uint32) MultiErrorOption {
 	return func(m *MultiError) {
 		if rate > 100 {
@@ -300,7 +293,7 @@ func WithSampling(rate uint32) MultiErrorOption {
 }
 
 // WithRand sets a custom random source for sampling, useful for testing.
-// Returns a MultiErrorOption for use with NewMultiError.
+// Returns a MultiErrorOption for use with NewMultiError; defaults to fastRand if nil.
 func WithRand(r *rand.Rand) MultiErrorOption {
 	return func(m *MultiError) {
 		m.rand = r
@@ -308,7 +301,7 @@ func WithRand(r *rand.Rand) MultiErrorOption {
 }
 
 // defaultFormat provides the default formatting for multiple errors.
-// Returns a semicolon-separated list prefixed with the error count.
+// Returns a semicolon-separated list prefixed with the error count (e.g., "errors(3): err1; err2; err3").
 func defaultFormat(errs []error) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("errors(%d): ", len(errs)))
@@ -322,7 +315,7 @@ func defaultFormat(errs []error) string {
 }
 
 // fastRand generates a quick pseudo-random number for sampling.
-// Uses a simple xorshift algorithm based on the current time.
+// Uses a simple xorshift algorithm based on the current time; not cryptographically secure.
 func fastRand() uint32 {
 	r := uint32(time.Now().UnixNano())
 	r ^= r << 13
