@@ -202,28 +202,41 @@ func (m *MultiError) IsNull() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	fmt.Printf("MultiError.IsNull: checking %d errors\n", len(m.errors))
+
 	// Fast path for empty MultiError
 	if len(m.errors) == 0 {
+		fmt.Println("MultiError.IsNull: empty, returning true")
 		return true
 	}
 
 	// Check each error
-	for _, err := range m.errors {
+	allNull := true
+	for i, err := range m.errors {
+		fmt.Printf("MultiError.IsNull: checking error %d: %v\n", i, err)
 		switch e := err.(type) {
 		case interface{ IsNull() bool }:
-			if !e.IsNull() {
-				return false
+			isNull := e.IsNull()
+			fmt.Printf("MultiError.IsNull: error %d has IsNull(), result=%v\n", i, isNull)
+			if !isNull {
+				allNull = false
+				break
 			}
 		case nil:
+			fmt.Printf("MultiError.IsNull: error %d is nil\n", i)
 			continue
 		default:
-			// For errors that don't implement IsNull(), check Error() string
-			if e.Error() != "" {
-				return false
+			hasContent := e.Error() != ""
+			fmt.Printf("MultiError.IsNull: error %d default check, hasContent=%v\n", i, hasContent)
+			if hasContent {
+				allNull = false
+				break
 			}
 		}
 	}
-	return true
+
+	fmt.Printf("MultiError.IsNull: allNull=%v\n", allNull)
+	return allNull
 }
 
 // Single returns nil if the collection is empty, the single error if only one exists,

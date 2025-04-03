@@ -560,6 +560,24 @@ func (e *Error) IsNull() bool {
 		return false
 	}
 
+	// Check cause first - if it’s null, the whole error is null
+	if e.cause != nil {
+		fmt.Printf("IsNull: checking cause=%v\n", e.cause)
+		var isNull bool
+		if ce, ok := e.cause.(*Error); ok {
+			isNull = ce.IsNull()
+			fmt.Printf("IsNull: cause is Error, recursive result=%v\n", isNull)
+		} else {
+			isNull = sqlNull(e.cause)
+			fmt.Printf("IsNull: cause sqlNull result=%v\n", isNull)
+		}
+		if isNull {
+			fmt.Printf("IsNull: cause is null, returning true\n")
+			return true
+		}
+		// If cause isn’t null, continue checking this error’s context
+	}
+
 	// Check small context
 	if e.smallCount > 0 {
 		fmt.Printf("Is    IsNull: checking %d small context items\n", e.smallCount)
@@ -599,25 +617,10 @@ func (e *Error) IsNull() bool {
 		}
 	}
 
-	// Check cause
-	if e.cause != nil {
-		fmt.Printf("IsNull: checking cause=%v\n", e.cause)
-		isNull := sqlNull(e.cause)
-		if !isNull {
-			if ce, ok := e.cause.(*Error); ok {
-				isNull = ce.IsNull()
-				fmt.Printf("IsNull: cause is Error, recursive result=%v\n", isNull)
-			} else {
-				fmt.Printf("IsNull: cause sqlNull result=%v\n", isNull)
-			}
-		} else {
-			fmt.Printf("IsNull: cause is null\n")
-		}
-		return isNull // Return the cause's null-ness if there’s a cause
-	}
-
-	// If we get here, no cause, check if all context is null
-	result := (e.smallCount > 0 || e.context != nil) && !hasContent
+	// If we get here, either:
+	// - Cause is non-null (we’d have returned false above if it made us non-null)
+	// - All context is null and there’s no cause
+	result := (e.smallCount > 0 || e.context != nil) // Null if we have context and it’s all null
 	fmt.Printf("IsNull: final result=%v (smallCount=%d, hasContext=%v, hasContent=%v)\n",
 		result, e.smallCount, e.context != nil, hasContent)
 	return result
