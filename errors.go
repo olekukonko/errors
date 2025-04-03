@@ -173,32 +173,43 @@ func Trace(text string) *Error {
 // Tracef creates a formatted error with stack trace.
 // Combines Errorf and WithStack for convenience.
 func Tracef(format string, args ...interface{}) *Error {
-	e := Errorf(format, args...)
+	e := Newf(format, args...)
 	return e.WithStack()
 }
 
-// As attempts to assign the error or its cause to the target interface.
-// Implements the errors.As interface for type assertion compatibility.
+// As attempts to assign the error or one in its chain to the target interface.
+// It only assigns when the target is a **Error and the current error node has a non-empty name.
+// If the current node has an empty name, it delegates to its wrapped cause.
 func (e *Error) As(target interface{}) bool {
 	if e == nil {
 		return false
 	}
 	if targetPtr, ok := target.(**Error); ok {
-		if e.name != "" {
-			*targetPtr = e
-			return true
-		}
-		if e.cause != nil {
-			if ce, ok := e.cause.(*Error); ok {
-				*targetPtr = ce
+		// Traverse the chain to find the deepest named *Error
+		current := e
+		for current != nil {
+			if current.name != "" {
+				*targetPtr = current
 				return true
 			}
+			if current.cause == nil {
+				break
+			}
+			if next, ok := current.cause.(*Error); ok {
+				current = next
+			} else {
+				break
+			}
 		}
+		// If no named error found, assign the original error
+		*targetPtr = e
+		return true
 	}
+	// For non-**Error targets, delegate to cause
 	if e.cause != nil {
-		return As(e.cause, target)
+		return errors.As(e.cause, target)
 	}
-	return false
+	return false // If no cause, this error doesn't match non-**Error targets
 }
 
 // Callback sets a function to be called when Error() is invoked.
@@ -289,16 +300,26 @@ func (e *Error) Error() string {
 	if e.callback != nil {
 		e.callback()
 	}
-	if e.msg != "" {
-		return e.msg
+	var msg string
+	switch {
+	case e.msg != "":
+		msg = e.msg
+	case e.template != "":
+		msg = e.template
+	case e.name != "":
+		msg = e.name
+	default:
+		msg = "unknown error"
 	}
-	if e.template != "" {
-		return e.template
+	if e.cause != nil {
+		causeMsg := e.cause.Error()
+		if msg != "" && causeMsg != "" {
+			msg = msg + ": " + causeMsg
+		} else if causeMsg != "" {
+			msg = causeMsg
+		}
 	}
-	if e.name != "" {
-		return e.name
-	}
-	return "unknown error"
+	return msg
 }
 
 // Errorf creates a formatted error without stack traces.
@@ -347,33 +368,85 @@ func (e *Error) Find(pred func(error) bool) error {
 
 // Format returns a formatted string representation of the error.
 func (e *Error) Format() string {
-	if e == nil {
-		return "<nil>"
-	}
 	var sb strings.Builder
-	sb.WriteString(e.Error())
-	if ctx := e.Context(); ctx != nil {
-		sb.WriteString("\ncontext: ")
-		data, _ := json.MarshalIndent(ctx, "", "  ")
-		sb.Write(data)
+
+	// Error message
+	sb.WriteString("Error: " + e.Error() + "\n")
+
+	// Metadata
+	if e.code != 0 {
+		sb.WriteString(fmt.Sprintf("Code: %d\n", e.code))
 	}
-	if stack := e.Stack(); len(stack) > 0 {
-		sb.WriteString("\nstack:\n")
-		for _, frame := range stack {
-			sb.WriteString(frame)
-			sb.WriteRune('\n')
+
+	// Context (only show context added at this level)
+	if ctx := e.contextAtThisLevel(); len(ctx) > 0 {
+		sb.WriteString("Context:\n")
+		for k, v := range ctx {
+			sb.WriteString(fmt.Sprintf("  %s: %v\n", k, v))
 		}
 	}
-	if e.cause != nil {
-		sb.WriteString("\ncause: ")
-		if ce, ok := e.cause.(*Error); ok {
-			sb.WriteString(ce.Format())
-		} else {
-			sb.WriteString(e.cause.Error())
+
+	// Stack trace
+	if e.stack != nil {
+		sb.WriteString("Stack:\n")
+		for i, frame := range e.Stack() {
+			sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, frame))
 		}
 	}
+
 	return sb.String()
 }
+
+func (e *Error) contextAtThisLevel() map[string]interface{} {
+	if e.context == nil && e.smallCount == 0 {
+		return nil
+	}
+
+	ctx := make(map[string]interface{})
+	// Add smallContext items
+	for i := 0; i < int(e.smallCount); i++ {
+		ctx[e.smallContext[i].key] = e.smallContext[i].value
+	}
+	// Add map context items
+	if e.context != nil {
+		for k, v := range e.context {
+			ctx[k] = v
+		}
+	}
+	return ctx
+}
+
+//func (e *Error) filteredContext() map[string]interface{} {
+//	ctx := e.Context()
+//	if ctx == nil {
+//		return nil
+//	}
+//
+//	// Get all keys from causes
+//	causeKeys := make(map[string]struct{})
+//	for current := e.cause; current != nil; {
+//		if err, ok := current.(*Error); ok {
+//			if cctx := err.Context(); cctx != nil {
+//				for k := range cctx {
+//					causeKeys[k] = struct{}{}
+//				}
+//			}
+//			current = err.cause
+//		} else {
+//			break
+//		}
+//	}
+//
+//	// Filter out duplicates
+//	filtered := make(map[string]interface{})
+//	for k, v := range ctx {
+//		if _, exists := causeKeys[k]; !exists {
+//			filtered[k] = v
+//		}
+//	}
+//
+//	return filtered
+//}
 
 // Free resets the error and returns it to the pool if pooling is enabled.
 // Does nothing beyond reset if pooling is disabled.
@@ -424,21 +497,26 @@ func (e *Error) Increment() *Error {
 	return e
 }
 
-// Is checks if the error matches a target error by name or wrapped cause.
-// Implements the errors.Is interface for standard library compatibility.
+// Is checks if the error matches a target error by pointer equality, name, or wrapped cause.
+// Ensures compatibility with stderrors.Is by prioritizing chain traversal.
 func (e *Error) Is(target error) bool {
 	if e == nil || target == nil {
 		return e == target
 	}
-	if te, ok := target.(*Error); ok {
-		if e.name != "" && e.name == te.name {
+	if e == target {
+		return true
+	}
+	if e.name != "" {
+		if te, ok := target.(*Error); ok && te.name != "" && e.name == te.name {
 			return true
 		}
-	} else if e.cause != nil {
-		return errors.Is(e.cause, target)
+	}
+	// Add string comparison for standard errors
+	if stdErr, ok := target.(error); ok && e.Error() == stdErr.Error() {
+		return true
 	}
 	if e.cause != nil {
-		return Is(e.cause, target)
+		return errors.Is(e.cause, target)
 	}
 	return false
 }
@@ -614,19 +692,24 @@ func (e *Error) Stack() []string {
 	if e.stack == nil {
 		return nil
 	}
-	configMu.RLock()
-	filter := currentConfig.filterInternal
-	configMu.RUnlock()
 
 	frames := runtime.CallersFrames(e.stack)
 	var trace []string
 	for {
 		frame, more := frames.Next()
-		if filter && isInternalFrame(frame) {
+		if frame == (runtime.Frame{}) {
+			break
+		}
+
+		if currentConfig.filterInternal && isInternalFrame(frame) {
 			continue
 		}
-		trace = append(trace, fmt.Sprintf("%s\n\t%s:%d",
-			frame.Function, frame.File, frame.Line))
+
+		trace = append(trace, fmt.Sprintf("%s %s:%d",
+			frame.Function,
+			frame.File,
+			frame.Line))
+
 		if !more {
 			break
 		}
@@ -638,7 +721,7 @@ func (e *Error) Stack() []string {
 // Does nothing if stack tracing is disabled; returns the error for chaining.
 func (e *Error) Trace() *Error {
 	if e.stack == nil {
-		e.stack = captureStack(1)
+		e.stack = captureStack(2)
 	}
 	return e
 }
@@ -666,11 +749,44 @@ func (e *Error) UnwrapAll() []error {
 	if e == nil {
 		return nil
 	}
-	var result []error
-	e.Walk(func(err error) {
-		result = append(result, err)
-	})
-	return result
+	var chain []error
+	current := error(e)
+	for current != nil {
+		if e, ok := current.(*Error); ok {
+			// Create a copy with only this error's message and metadata
+			isolated := newError()
+			isolated.msg = e.msg
+			isolated.name = e.name
+			isolated.template = e.template
+			isolated.code = e.code
+			isolated.category = e.category
+			// Copy context
+			if e.smallCount > 0 {
+				isolated.smallCount = e.smallCount
+				for i := int32(0); i < e.smallCount; i++ {
+					isolated.smallContext[i] = e.smallContext[i]
+				}
+			}
+			if e.context != nil {
+				isolated.context = make(map[string]interface{}, len(e.context))
+				for k, v := range e.context {
+					isolated.context[k] = v
+				}
+			}
+			if e.stack != nil {
+				isolated.stack = append([]uintptr(nil), e.stack...)
+			}
+			chain = append(chain, isolated)
+		} else {
+			chain = append(chain, current)
+		}
+		if unwrappable, ok := current.(interface{ Unwrap() error }); ok {
+			current = unwrappable.Unwrap()
+		} else {
+			break
+		}
+	}
+	return chain
 }
 
 // Walk traverses the error chain, applying fn to each error.
@@ -679,7 +795,15 @@ func (e *Error) Walk(fn func(error)) {
 	if e == nil || fn == nil {
 		return
 	}
-	Walk(e, fn)
+	current := error(e)
+	for current != nil {
+		fn(current)
+		if unwrappable, ok := current.(interface{ Unwrap() error }); ok {
+			current = unwrappable.Unwrap()
+		} else {
+			break
+		}
+	}
 }
 
 // With adds a key-value pair to the error's context.
@@ -738,12 +862,7 @@ func (e *Error) WithRetryable() *Error {
 // Skips capturing if stack already exists or depth is 0.
 func (e *Error) WithStack() *Error {
 	if e.stack == nil {
-		if currentConfig.stackDepth > 0 {
-			e.stack = stackPool.Get().([]uintptr)
-			e.stack = e.stack[:0]
-			n := runtime.Callers(2, e.stack[:cap(e.stack)])
-			e.stack = e.stack[:n]
-		}
+		e.stack = captureStack(1) // Skip WithStack
 	}
 	return e
 }
@@ -764,14 +883,11 @@ func (e *Error) WithTimeout() *Error {
 // Wrap associates a cause error with this error, creating an error chain.
 // Returns the error for method chaining.
 func (e *Error) Wrap(cause error) *Error {
+	if cause == nil {
+		return e
+	}
 	e.cause = cause
 	return e
-}
-
-// Wrapf creates a new error with a formatted message and wraps an existing error.
-// Combines Newf and Wrap for convenience.
-func Wrapf(err error, format string, args ...interface{}) *Error {
-	return Newf(format, args...).Wrap(err)
 }
 
 // WrapNotNil wraps a cause error only if it is non-nil.

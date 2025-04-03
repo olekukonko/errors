@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -68,8 +69,8 @@ func TestErrorMethods(t *testing.T) {
 
 	// Test Msgf
 	err = err.Msgf("new message %d", 123)
-	if err.Error() != "new message 123" {
-		t.Errorf("Msgf() failed, error = %v, want %v", err.Error(), "new message 123")
+	if err.Error() != "new message 123: cause error" {
+		t.Errorf("Msgf() failed, error = %v, want %v", err.Error(), "new message 123: cause error")
 	}
 
 	// Test Trace (should capture stack if none exists)
@@ -117,18 +118,20 @@ func TestIs(t *testing.T) {
 		t.Errorf("Is() failed, %v should not match %v", err, err3)
 	}
 
-	// Test wrapping
+	wrappedErr := Named("wrapper")
+	defer wrappedErr.Free()
 	cause := Named("cause_error")
 	defer cause.Free()
-	err = err.Wrap(cause)
-	if !Is(err, cause) {
-		t.Errorf("Is() failed, wrapped error should match cause")
+	wrappedErr = wrappedErr.Wrap(cause)
+	t.Logf("Before Is(cause): wrappedErr.cause = %p, cause = %p", wrappedErr.cause, cause)
+	if !wrappedErr.Is(cause) {
+		t.Errorf("Is() failed, wrapped error should match cause; wrappedErr = %+v, cause = %+v", wrappedErr, cause)
 	}
 
-	// Test with stdlib error
 	stdErr := errors.New("std error")
-	err = err.Wrap(stdErr)
-	if !Is(err, stdErr) {
+	wrappedErr = wrappedErr.Wrap(stdErr)
+	t.Logf("Before Is(stdErr): wrappedErr.cause = %p, stdErr = %p", wrappedErr.cause, stdErr)
+	if !wrappedErr.Is(stdErr) {
 		t.Errorf("Is() failed, should match stdlib error")
 	}
 }
@@ -376,5 +379,248 @@ func TestFind(t *testing.T) {
 
 	if found != nil {
 		t.Errorf("Find() = %v; want nil", found)
+	}
+}
+
+func TestTraceStackContent(t *testing.T) {
+	err := Trace("test")
+	defer err.Free()
+	frames := err.Stack()
+	if len(frames) == 0 {
+		t.Fatal("Trace() should capture stack frames")
+	}
+	// Look for the test runner frame instead
+	found := false
+	for _, frame := range frames {
+		if strings.Contains(frame, "testing.tRunner") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Trace() stack does not contain testing.tRunner, got: %v", frames)
+	}
+}
+
+func TestWithStackContent(t *testing.T) {
+	err := New("test").WithStack()
+	defer err.Free()
+	frames := err.Stack()
+	if len(frames) == 0 {
+		t.Fatal("WithStack() should capture stack frames")
+	}
+	// Look for the test runner frame instead
+	found := false
+	for _, frame := range frames {
+		if strings.Contains(frame, "testing.tRunner") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("WithStack() stack does not contain testing.tRunner, got: %v", frames)
+	}
+}
+
+func TestErrorWrappingChain(t *testing.T) {
+	// Recreate the scenario from the example
+	databaseErr := New("connection timeout").
+		With("timeout_sec", 5).
+		With("server", "db01.prod")
+
+	defer databaseErr.Free()
+
+	businessErr := New("failed to process user 12345").
+		With("user_id", "12345").
+		With("stage", "processing").
+		Wrap(databaseErr)
+
+	defer businessErr.Free()
+
+	apiErr := New("API request failed").
+		WithCode(500).
+		WithStack().
+		Wrap(businessErr)
+
+	defer apiErr.Free()
+
+	// Test the full error message
+	expectedFullMessage := "API request failed: failed to process user 12345: connection timeout"
+	if apiErr.Error() != expectedFullMessage {
+		t.Errorf("Full error message mismatch\ngot: %q\nwant: %q", apiErr.Error(), expectedFullMessage)
+	}
+
+	// Test the unwrapping chain order
+	chain := UnwrapAll(apiErr)
+	if len(chain) != 3 {
+		t.Fatalf("Expected chain length 3, got %d", len(chain))
+	}
+
+	// Verify each error in the chain
+	tests := []struct {
+		index    int
+		expected string
+	}{
+		{0, "API request failed"},
+		{1, "failed to process user 12345"},
+		{2, "connection timeout"},
+	}
+
+	for _, tt := range tests {
+		if chain[tt.index].Error() != tt.expected {
+			t.Errorf("Chain position %d mismatch\ngot: %q\nwant: %q",
+				tt.index, chain[tt.index].Error(), tt.expected)
+		}
+	}
+
+	// Verify the Is() functionality
+	if !errors.Is(apiErr, databaseErr) {
+		t.Error("Is() should match the database error in the chain")
+	}
+
+	// Verify context is properly isolated at each level
+	if ctx := businessErr.Context(); ctx["timeout_sec"] != nil {
+		t.Error("Business error should not have database context")
+	}
+
+	// Verify stack trace is only where we added it
+	if stack := apiErr.Stack(); len(stack) == 0 {
+		t.Error("API error should have stack trace")
+	}
+	if stack := businessErr.Stack(); len(stack) != 0 {
+		t.Error("Business error should not have stack trace")
+	}
+
+	// Verify code is only where we set it
+	if apiErr.Code() != 500 {
+		t.Error("API error should have code 500")
+	}
+	if businessErr.Code() != 0 {
+		t.Error("Business error should have no code")
+	}
+}
+
+func TestExampleOutput(t *testing.T) {
+	// This test verifies the output matches the example's expected output
+	databaseErr := New("connection timeout").
+		With("timeout_sec", 5).
+		With("server", "db01.prod")
+
+	businessErr := New("failed to process user 12345").
+		With("user_id", "12345").
+		With("stage", "processing").
+		Wrap(databaseErr)
+
+	apiErr := New("API request failed").
+		WithCode(500).
+		WithStack().
+		Wrap(businessErr)
+
+	// Test the Format output for each error in the chain
+	chain := UnwrapAll(apiErr)
+	for _, err := range chain {
+		if e, ok := err.(*Error); ok {
+			formatted := e.Format()
+			if formatted == "" {
+				t.Error("Format() returned empty string")
+			}
+			// Basic sanity checks of the formatted output
+			if !strings.Contains(formatted, "Error: "+e.Error()) {
+				t.Errorf("Format() output missing error message: %q", formatted)
+			}
+			if e == apiErr {
+				if !strings.Contains(formatted, "Code: 500") {
+					t.Error("Format() missing code for API error")
+				}
+				if !strings.Contains(formatted, "Stack:") {
+					t.Error("Format() missing stack for API error")
+				}
+			}
+			if e == businessErr {
+				if ctx := e.Context(); ctx != nil {
+					if !strings.Contains(formatted, "Context:") {
+						t.Error("Format() missing context for business error")
+					}
+					for k := range ctx {
+						if !strings.Contains(formatted, k) {
+							t.Errorf("Format() missing context key %q", k)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Test the Is() match as shown in the example
+	if !errors.Is(apiErr, errors.New("connection timeout")) {
+		t.Error("Is() failed to match connection timeout error")
+	}
+}
+
+// TestFullErrorChain builds an error chain and verifies the custom and standard
+// behavior of Is and As (for *Error targets) as well as UnwrapAll.
+// In the test document (first document):
+func TestFullErrorChain(t *testing.T) {
+	stdErr := errors.New("file not found")
+	authErr := Named("AuthError").WithCode(401)
+	storageErr := Wrapf(stdErr, "storage failed")
+	authErrWrapped := Wrap(storageErr, authErr)
+	wrapped := Wrapf(authErrWrapped, "request failed")
+
+	// --- Test Is ---
+	if !Is(wrapped, authErr) {
+		t.Errorf("Is(wrapped, authErr) failed, expected true")
+	}
+	if !errors.Is(wrapped, authErr) {
+		t.Errorf("stderrors.Is(wrapped, authErr) failed, expected true")
+	}
+	if !Is(wrapped, stdErr) {
+		t.Errorf("Is(wrapped, stdErr) failed, expected true")
+	}
+	if !errors.Is(wrapped, stdErr) {
+		t.Errorf("stderrors.Is(wrapped, stdErr) failed, expected true")
+	}
+
+	// --- Test As for *Error target ---
+	var targetAuth *Error
+	if !As(wrapped, &targetAuth) || targetAuth.Name() != "AuthError" || targetAuth.Code() != 401 {
+		t.Errorf("As(wrapped, &targetAuth) failed, got name=%s, code=%d; want AuthError, 401", targetAuth.Name(), targetAuth.Code())
+	}
+	if !errors.As(wrapped, &targetAuth) || targetAuth.Name() != "AuthError" || targetAuth.Code() != 401 {
+		t.Errorf("stderrors.As(wrapped, &targetAuth) failed, got name=%s, code=%d; want AuthError, 401", targetAuth.Name(), targetAuth.Code())
+	}
+
+	// --- Test UnwrapAll ---
+	chain := UnwrapAll(wrapped)
+	if len(chain) != 4 {
+		t.Errorf("UnwrapAll(wrapped) length = %d, want 4", len(chain))
+	}
+	expected := []string{
+		"request failed",
+		"storage failed",
+		"AuthError",
+		"file not found",
+	}
+	for i, err := range chain {
+		if err.Error() != expected[i] {
+			t.Errorf("UnwrapAll[%d] = %v, want %v", i, err.Error(), expected[i])
+		}
+	}
+}
+
+func TestUnwrapAllMessageIsolation(t *testing.T) {
+	inner := New("inner")
+	middle := New("middle").Wrap(inner)
+	outer := New("outer").Wrap(middle)
+
+	chain := UnwrapAll(outer)
+	if chain[0].Error() != "outer" {
+		t.Errorf("Expected 'outer', got %q", chain[0].Error())
+	}
+	if chain[1].Error() != "middle" {
+		t.Errorf("Expected 'middle', got %q", chain[1].Error())
+	}
+	if chain[2].Error() != "inner" {
+		t.Errorf("Expected 'inner', got %q", chain[2].Error())
 	}
 }

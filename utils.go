@@ -30,18 +30,17 @@ func WarmStackPool(count int) {
 // captureStack captures a stack trace with the configured depth.
 // skip=0 means capture current call site
 func captureStack(skip int) []uintptr {
-	// Get buffer with enough capacity
 	buf := stackPool.Get().([]uintptr)
 	buf = buf[:cap(buf)]
 
-	// +1 skips runtime.Callers itself
+	// +2 to skip captureStack and the immediate caller
 	n := runtime.Callers(skip+2, buf)
 	if n == 0 {
 		stackPool.Put(buf)
 		return nil
 	}
 
-	// Return exact-sized slice
+	// Create a new slice to return (don't return pooled slice directly)
 	stack := make([]uintptr, n)
 	copy(stack, buf[:n])
 	stackPool.Put(buf)
@@ -90,13 +89,23 @@ func getFuncName(fn interface{}) string {
 // isInternalFrame determines if a stack frame is considered "internal".
 // Filters frames from runtime, reflect, or this package if FilterInternal is true.
 func isInternalFrame(frame runtime.Frame) bool {
-	// Filter runtime and reflect packages
 	if strings.HasPrefix(frame.Function, "runtime.") || strings.HasPrefix(frame.Function, "reflect.") {
 		return true
 	}
-	// Filter frames from this package
-	if strings.Contains(frame.File, "github.com/olekukonko/errors") {
-		return true
+
+	suffixes := []string{
+		"errors",
+		"utils",
+		"helper",
+		"retry",
+		"multi",
+	}
+
+	file := frame.File
+	for _, v := range suffixes {
+		if strings.Contains(file, fmt.Sprintf("github.com/olekukonko/errors/%s", v)) {
+			return true
+		}
 	}
 	return false
 }

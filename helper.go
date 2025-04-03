@@ -3,6 +3,7 @@ package errors
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 )
@@ -34,6 +35,36 @@ func Context(err error) map[string]interface{} {
 	return nil
 }
 
+// Convert transforms any error into an *Error, preserving its message and wrapping it if needed.
+// Returns nil if the input is nil; returns the original if already an *Error.
+func Convert(err error) *Error {
+	if err == nil {
+		return nil
+	}
+
+	// First try direct type assertion (fast path)
+	if e, ok := err.(*Error); ok {
+		return e
+	}
+
+	// Try using errors.As (more flexible)
+	var e *Error
+	if errors.As(err, &e) {
+		return e
+	}
+
+	// Manual unwrapping as fallback
+	for unwrapped := err; unwrapped != nil; {
+		if e, ok := unwrapped.(*Error); ok {
+			return e
+		}
+		unwrapped = errors.Unwrap(unwrapped)
+	}
+
+	// Final fallback: create new error
+	return New(err.Error()).Wrap(err)
+}
+
 // Count returns the occurrence count of an error, if it is an *Error.
 // Returns 0 for non-*Error types.
 func Count(err error) uint64 {
@@ -62,6 +93,13 @@ func Find(err error, pred func(error) bool) error {
 		}
 	}
 	return nil
+}
+
+// From transforms any error into an *Error, preserving its message and wrapping it if needed.
+// Returns nil if the input is nil; returns the original if already an *Error.
+// alias of Convert
+func From(err error) *Error {
+	return Convert(err)
 }
 
 // FromContext creates an error from a context and an existing error.
@@ -111,9 +149,15 @@ func HasContextKey(err error, key string) bool {
 // Is wraps errors.Is, using custom matching for *Error types.
 // Falls back to standard errors.Is for non-*Error types.
 func Is(err, target error) bool {
+	if err == nil || target == nil {
+		return err == target
+	}
+
 	if e, ok := err.(*Error); ok {
 		return e.Is(target)
 	}
+
+	// Use standard errors.Is for non-Error types
 	return errors.Is(err, target)
 }
 
@@ -233,6 +277,9 @@ func UnwrapAll(err error) []error {
 	if err == nil {
 		return nil
 	}
+	if e, ok := err.(*Error); ok {
+		return e.UnwrapAll()
+	}
 	var result []error
 	Walk(err, func(e error) {
 		result = append(result, e)
@@ -259,6 +306,22 @@ func Transform(err error, fn func(*Error)) error {
 		return e.Transform(fn)
 	}
 	return err
+}
+
+// Unwrap returns the result of calling the Unwrap method on err, if err's
+// type contains an Unwrap method returning error.
+func Unwrap(err error) error {
+	for current := err; current != nil; {
+		if e, ok := current.(*Error); ok {
+			if e.cause == nil {
+				return current
+			}
+			current = e.cause
+		} else {
+			return current
+		}
+	}
+	return nil
 }
 
 // Walk traverses the error chain, applying fn to each error.
@@ -288,11 +351,39 @@ func With(err error, key string, value interface{}) error {
 	return err
 }
 
-// Wrap associates a cause with a wrapper error, if the wrapper is an *Error.
-// Returns the wrapper unchanged if not an *Error.
-func Wrap(wrapper, cause error) error {
-	if e, ok := wrapper.(*Error); ok {
-		return e.Wrap(cause)
+// WithStack converts any error to *Error and captures stack trace
+// If input is nil, returns nil. If already *Error, adds stack trace.
+func WithStack(err error) *Error {
+	if err == nil {
+		return nil
 	}
+	if e, ok := err.(*Error); ok {
+		return e.WithStack()
+	}
+	return New(err.Error()).WithStack().Wrap(err)
+}
+
+// Wrap creates a new error that wraps another error with additional context.
+// It accepts either a *Error, an error, or a string as its wrapper.
+func Wrap(err error, wrapper *Error) *Error {
+	if err == nil {
+		return nil
+	}
+	if wrapper == nil {
+		wrapper = newError()
+	}
+	wrapper.cause = err
 	return wrapper
+}
+
+// Wrapf creates a new formatted error that wraps another error.
+// It ensures the cause is properly chained in the error hierarchy.
+func Wrapf(err error, format string, args ...interface{}) *Error {
+	if err == nil {
+		return nil
+	}
+	e := newError()
+	e.msg = fmt.Sprintf(format, args...)
+	e.cause = err
+	return e
 }
