@@ -133,6 +133,25 @@ func (r *Retry) Execute(fn func() error) error {
 	return lastErr
 }
 
+// Transform creates a new Retry instance with modified configuration.
+// It copies all settings from the original Retry and applies the given options.
+func (r *Retry) Transform(opts ...RetryOption) *Retry {
+	newRetry := &Retry{
+		maxAttempts: r.maxAttempts,
+		delay:       r.delay,
+		maxDelay:    r.maxDelay,
+		retryIf:     r.retryIf,
+		onRetry:     r.onRetry,
+		backoff:     r.backoff,
+		jitter:      r.jitter,
+		ctx:         r.ctx,
+	}
+	for _, opt := range opts {
+		opt(newRetry)
+	}
+	return newRetry
+}
+
 // WithBackoff sets the backoff strategy using the BackoffStrategy interface.
 // Returns a RetryOption for use with NewRetry.
 func WithBackoff(strategy BackoffStrategy) RetryOption {
@@ -212,10 +231,10 @@ func WithRetryIf(retryIf func(error) bool) RetryOption {
 	}
 }
 
-// ExecuteWithResult runs the provided function with retry logic and returns its result.
+// ExecuteReply runs the provided function with retry logic and returns its result.
 // Returns the function's result and nil error on success, or the last error on failure.
 // Type parameter T allows for generic return values.
-func ExecuteWithResult[T any](r *Retry, fn func() (T, error)) (T, error) {
+func ExecuteReply[T any](r *Retry, fn func() (T, error)) (T, error) {
 	var lastErr error
 	var zero T
 
