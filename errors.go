@@ -63,6 +63,7 @@ var bufferPool = sync.Pool{
 	},
 }
 
+// contextItem represents a single key-value pair in the smallContext array.
 type contextItem struct {
 	key   string
 	value interface{}
@@ -92,6 +93,7 @@ type Error struct {
 	mu sync.RWMutex // Protects concurrent access to mutable fields
 }
 
+// init initializes the package with default configuration and pre-warms the error pool.
 func init() {
 	currentConfig = cachedConfig{
 		stackDepth:     stackDepth,
@@ -232,8 +234,8 @@ func (e *Error) Callback(fn func()) *Error {
 	return e
 }
 
-// Category sets a category for the error and returns the error.
-// Useful for classifying errors (e.g., "network", "validation").
+// Category returns the error's category, if set.
+// Returns an empty string if no category is defined.
 func (e *Error) Category() string {
 	return e.category
 }
@@ -380,6 +382,7 @@ func (e *Error) Find(pred func(error) bool) error {
 }
 
 // Format returns a formatted string representation of the error.
+// Includes message, code, context, and stack trace if present.
 func (e *Error) Format() string {
 	var sb strings.Builder
 
@@ -410,6 +413,8 @@ func (e *Error) Format() string {
 	return sb.String()
 }
 
+// contextAtThisLevel returns context specific to this error level, excluding inherited context.
+// Combines smallContext and context map into a single map; returns nil if empty.
 func (e *Error) contextAtThisLevel() map[string]interface{} {
 	if e.context == nil && e.smallCount == 0 {
 		return nil
@@ -428,38 +433,6 @@ func (e *Error) contextAtThisLevel() map[string]interface{} {
 	}
 	return ctx
 }
-
-//func (e *Error) filteredContext() map[string]interface{} {
-//	ctx := e.Context()
-//	if ctx == nil {
-//		return nil
-//	}
-//
-//	// Get all keys from causes
-//	causeKeys := make(map[string]struct{})
-//	for current := e.cause; current != nil; {
-//		if err, ok := current.(*Error); ok {
-//			if cctx := err.Context(); cctx != nil {
-//				for k := range cctx {
-//					causeKeys[k] = struct{}{}
-//				}
-//			}
-//			current = err.cause
-//		} else {
-//			break
-//		}
-//	}
-//
-//	// Filter out duplicates
-//	filtered := make(map[string]interface{})
-//	for k, v := range ctx {
-//		if _, exists := causeKeys[k]; !exists {
-//			filtered[k] = v
-//		}
-//	}
-//
-//	return filtered
-//}
 
 // Free resets the error and returns it to the pool if pooling is enabled.
 // Does nothing beyond reset if pooling is disabled.
@@ -485,6 +458,7 @@ func (e *Error) Has() bool {
 }
 
 // HasContextKey checks if the specified key exists in the error's context.
+// Searches both smallContext and context map; thread-safe.
 func (e *Error) HasContextKey(key string) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -534,7 +508,8 @@ func (e *Error) Is(target error) bool {
 	return false
 }
 
-// IsEmpty checks if the error has no meaningful content (empty message, no name/template/cause)
+// IsEmpty checks if the error has no meaningful content (empty message, no name/template/cause).
+// Returns true for nil errors or errors with no data.
 func (e *Error) IsEmpty() bool {
 	if e == nil {
 		return true
@@ -542,14 +517,12 @@ func (e *Error) IsEmpty() bool {
 	return e.msg == "" && e.template == "" && e.name == "" && e.cause == nil
 }
 
-// IsNull checks if an error is nil or represents a SQL NULL value
-// Considers both the error itself and any context values
+// IsNull checks if an error is nil or represents a SQL NULL value.
+// Considers both the error itself and any context values; returns true if all context is null.
 func (e *Error) IsNull() bool {
 	if e == nil {
 		return true
 	}
-	// hasContent := e.msg != "" || e.name != "" || e.template != ""
-
 	// If no context or cause, and no content, it's not null
 	if e.smallCount == 0 && e.context == nil && e.cause == nil {
 		return false
@@ -589,7 +562,6 @@ func (e *Error) IsNull() bool {
 		allNull := true
 		for _, v := range e.context {
 			isNull := sqlNull(v)
-			// fmt.Printf("IsNull: context key=%s, value=%v, isNull=%v\n", k, v, isNull)
 			if !isNull {
 				allNull = false
 				break
@@ -600,11 +572,8 @@ func (e *Error) IsNull() bool {
 		}
 	}
 
-	// If we get here, either:
-	// - Cause is non-null (we’d have returned false above if it made us non-null)
-	// - All context is null and there’s no cause
-	result := e.smallCount > 0 || e.context != nil // Null if we have context and it’s all null
-	return result
+	// Null if we have context and it’s all null
+	return e.smallCount > 0 || e.context != nil
 }
 
 // MarshalJSON serializes the error to JSON, including name, message, context, cause, and stack.
@@ -616,7 +585,7 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 		Context map[string]interface{} `json:"context,omitempty"`
 		Cause   interface{}            `json:"cause,omitempty"`
 		Stack   []string               `json:"stack,omitempty"`
-		Code    int                    `json:"code,omitempty"` // Add code field
+		Code    int                    `json:"code,omitempty"`
 	}
 
 	var ctx map[string]interface{}
@@ -636,7 +605,7 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 		Name:    e.name,
 		Message: e.msg,
 		Context: ctx,
-		Code:    e.Code(), // Include the status code
+		Code:    e.Code(),
 	}
 
 	if e.stack != nil {
@@ -713,7 +682,7 @@ func (e *Error) Name() string {
 }
 
 // Reset clears all fields of the error, preparing it for reuse.
-// Frees the stack to the pool if present but keeps it allocated.
+// Does not free the stack; use Free() to return to pool.
 func (e *Error) Reset() {
 	e.msg = ""
 	e.name = ""
@@ -768,7 +737,7 @@ func (e *Error) Stack() []string {
 }
 
 // Trace ensures the error has a stack trace, capturing it if missing.
-// Does nothing if stack tracing is disabled; returns the error for chaining.
+// Skips capture if stack already exists; returns the error for chaining.
 func (e *Error) Trace() *Error {
 	if e.stack == nil {
 		e.stack = captureStack(2)
@@ -776,8 +745,8 @@ func (e *Error) Trace() *Error {
 	return e
 }
 
-// Transform applies transformations to the error if it's a *Error.
-// Returns a new transformed error or the original if no changes needed.
+// Transform applies transformations to a copy of the error.
+// Returns the transformed copy or the original if no changes are needed.
 func (e *Error) Transform(fn func(*Error)) *Error {
 	if e == nil || fn == nil {
 		return e
@@ -794,8 +763,7 @@ func (e *Error) Unwrap() error {
 }
 
 // UnwrapAll returns a slice of all errors in the chain, starting with this error.
-// Traverses both Unwrap() and Cause() chains.
-// In the core error implementation (second document):
+// Traverses the cause chain, creating isolated copies of each *Error.
 func (e *Error) UnwrapAll() []error {
 	if e == nil {
 		return nil
@@ -839,7 +807,7 @@ func (e *Error) UnwrapAll() []error {
 }
 
 // Walk traverses the error chain, applying fn to each error.
-// Starts with the current error and follows Unwrap() and Cause() chains.
+// Starts with the current error and follows the cause chain.
 func (e *Error) Walk(fn func(error)) {
 	if e == nil || fn == nil {
 		return
@@ -856,7 +824,7 @@ func (e *Error) Walk(fn func(error)) {
 }
 
 // With adds a key-value pair to the error's context.
-// Uses smallContext for efficiency until full, then switches to map; returns the error.
+// Uses smallContext for efficiency until full, then switches to map; thread-safe.
 func (e *Error) With(key string, value interface{}) *Error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -871,7 +839,7 @@ func (e *Error) With(key string, value interface{}) *Error {
 		for i := int32(0); i < e.smallCount; i++ {
 			e.context[e.smallContext[i].key] = e.smallContext[i].value
 		}
-		e.smallCount = 3
+		e.smallCount = 3 // Note: This seems like a bug; should probably not reset
 	}
 	if e.context == nil {
 		e.context = make(map[string]interface{}, currentConfig.contextSize)
@@ -940,7 +908,7 @@ func (e *Error) Wrap(cause error) *Error {
 }
 
 // WrapNotNil wraps a cause error only if it is non-nil.
-// Returns the error for method chaining.
+// Returns the error for method chaining; no-op if cause is nil.
 func (e *Error) WrapNotNil(cause error) *Error {
 	if cause != nil {
 		e.cause = cause
