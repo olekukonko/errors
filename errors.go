@@ -534,6 +534,95 @@ func (e *Error) Is(target error) bool {
 	return false
 }
 
+// IsEmpty checks if the error has no meaningful content (empty message, no name/template/cause)
+func (e *Error) IsEmpty() bool {
+	if e == nil {
+		return true
+	}
+	return e.msg == "" && e.template == "" && e.name == "" && e.cause == nil
+}
+
+// IsNull checks if an error is nil or represents a SQL NULL value
+// Considers both the error itself and any context values
+func (e *Error) IsNull() bool {
+	if e == nil {
+		fmt.Println("IsNull: nil error, returning true")
+		return true
+	}
+
+	fmt.Printf("IsNull: msg=%q, name=%q, template=%q\n", e.msg, e.name, e.template)
+	hasContent := e.msg != "" || e.name != "" || e.template != ""
+	fmt.Printf("IsNull: smallCount=%d, context=%v, cause=%v\n", e.smallCount, e.context, e.cause)
+
+	// If no context or cause, and no content, it's not null
+	if e.smallCount == 0 && e.context == nil && e.cause == nil {
+		fmt.Println("IsNull: no content, returning false")
+		return false
+	}
+
+	// Check small context
+	if e.smallCount > 0 {
+		fmt.Printf("Is    IsNull: checking %d small context items\n", e.smallCount)
+		allNull := true
+		for i := 0; i < int(e.smallCount); i++ {
+			isNull := sqlNull(e.smallContext[i].value)
+			fmt.Printf("IsNull: smallContext[%d] key=%s, value=%v, isNull=%v\n",
+				i, e.smallContext[i].key, e.smallContext[i].value, isNull)
+			if !isNull {
+				allNull = false
+				break
+			}
+		}
+		fmt.Printf("IsNull: small context allNull=%v\n", allNull)
+		if !allNull {
+			fmt.Println("IsNull: small context has non-null values, returning false")
+			return false
+		}
+	}
+
+	// Check regular context
+	if e.context != nil {
+		fmt.Println("IsNull: checking regular context")
+		allNull := true
+		for k, v := range e.context {
+			isNull := sqlNull(v)
+			fmt.Printf("IsNull: context key=%s, value=%v, isNull=%v\n", k, v, isNull)
+			if !isNull {
+				allNull = false
+				break
+			}
+		}
+		fmt.Printf("IsNull: regular context allNull=%v\n", allNull)
+		if !allNull {
+			fmt.Println("IsNull: regular context has non-null values, returning false")
+			return false
+		}
+	}
+
+	// Check cause
+	if e.cause != nil {
+		fmt.Printf("IsNull: checking cause=%v\n", e.cause)
+		isNull := sqlNull(e.cause)
+		if !isNull {
+			if ce, ok := e.cause.(*Error); ok {
+				isNull = ce.IsNull()
+				fmt.Printf("IsNull: cause is Error, recursive result=%v\n", isNull)
+			} else {
+				fmt.Printf("IsNull: cause sqlNull result=%v\n", isNull)
+			}
+		} else {
+			fmt.Printf("IsNull: cause is null\n")
+		}
+		return isNull // Return the cause's null-ness if there’s a cause
+	}
+
+	// If we get here, no cause, check if all context is null
+	result := (e.smallCount > 0 || e.context != nil) && !hasContent
+	fmt.Printf("IsNull: final result=%v (smallCount=%d, hasContext=%v, hasContent=%v)\n",
+		result, e.smallCount, e.context != nil, hasContent)
+	return result
+}
+
 // MarshalJSON serializes the error to JSON, including name, message, context, cause, and stack.
 // Handles nested *Error causes and custom marshalers efficiently.
 func (e *Error) MarshalJSON() ([]byte, error) {
@@ -635,44 +724,6 @@ func (e *Error) Msgf(format string, args ...interface{}) *Error {
 // Returns an empty string if no name is defined.
 func (e *Error) Name() string {
 	return e.name
-}
-
-// Null checks if an error is nil or empty across various error types.
-// Considers basic fields, context, and wrapped causes.
-func (e *Error) Null() bool {
-	if e == nil {
-		return true
-	}
-
-	if e.Has() {
-		return false
-	}
-
-	if e.smallCount > 0 {
-		for i := 0; i < int(e.smallCount); i++ {
-			if sqlNull(e.smallContext[i].value) {
-				return false
-			}
-		}
-	}
-	if e.context != nil {
-		for _, v := range e.context {
-			if sqlNull(v) {
-				return false
-			}
-		}
-	}
-
-	if e.cause != nil {
-		if sqlNull(e.cause) {
-			return false
-		}
-		if _, ok := e.cause.(interface{ Valid() bool }); ok {
-			return false
-		}
-	}
-
-	return true
 }
 
 // Reset clears all fields of the error, preparing it for reuse.

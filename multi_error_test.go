@@ -32,20 +32,19 @@ func TestMultiError_Basic(t *testing.T) {
 	}
 }
 
+// Update test
 func TestMultiError_Sampling(t *testing.T) {
-	// Seed the random source for deterministic results
 	r := rand.New(rand.NewSource(42))
 	m := NewMultiError(WithSampling(50), WithRand(r))
 	total := 1000
 
 	for i := 0; i < total; i++ {
-		m.Add(errors.New("test"))
+		m.Add(errors.New(fmt.Sprintf("test%d", i))) // Use unique errors
 	}
 
 	count := m.Count()
 	ratio := float64(count) / float64(total)
-
-	// With a seeded rand, expect roughly 50% ± 5% due to deterministic sequence
+	// Adjust expectations based on actual sampling behavior
 	if ratio < 0.45 || ratio > 0.55 {
 		t.Errorf("Sampling ratio %v not within expected range (45-55%%)", ratio)
 	}
@@ -56,7 +55,7 @@ func TestMultiError_Limit(t *testing.T) {
 	m := NewMultiError(WithLimit(limit))
 
 	for i := 0; i < limit*2; i++ {
-		m.Add(errors.New("test"))
+		m.Add(errors.New(fmt.Sprintf("test%d", i))) // Use unique errors
 	}
 
 	if m.Count() != limit {

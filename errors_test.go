@@ -1,6 +1,7 @@
 package errors
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -625,5 +626,115 @@ func TestUnwrapAllMessageIsolation(t *testing.T) {
 	}
 	if chain[2].Error() != "inner" {
 		t.Errorf("Expected 'inner', got %q", chain[2].Error())
+	}
+}
+
+func TestIsEmpty(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      *Error
+		expected bool
+	}{
+		{"nil error", nil, true},
+		{"empty error", New(""), true},
+		{"named empty", Named(""), true},
+		{"with empty template", New("").WithTemplate(""), true},
+		{"with message", New("test"), false},
+		{"with name", Named("test"), false},
+		{"with template", New("").WithTemplate("template"), false},
+		{"with cause", New("").Wrap(New("cause")), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.err != nil {
+				defer tt.err.Free()
+			}
+			if got := tt.err.IsEmpty(); got != tt.expected {
+				t.Errorf("IsEmpty() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsNull(t *testing.T) {
+	nullString := sql.NullString{Valid: false}
+	validString := sql.NullString{String: "test", Valid: true}
+
+	tests := []struct {
+		name     string
+		err      *Error
+		expected bool
+	}{
+		{"nil error", nil, true},
+		{"empty error", New(""), false},
+		{"with NULL context", New("").With("data", nullString), true},
+		{"with valid context", New("").With("data", validString), false},
+		{"with NULL cause", New("").Wrap(New("NULL value").With("data", nullString)), true},
+		{"with valid cause", New("").Wrap(New("valid value").With("data", validString)), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.err != nil {
+				defer tt.err.Free()
+			}
+			if got := tt.err.IsNull(); got != tt.expected {
+				t.Errorf("IsNull() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestPackageIsEmpty(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{"nil error", nil, true},
+		{"empty std error", errors.New(""), true},
+		{"whitespace error", errors.New("   "), true},
+		{"non-empty std error", errors.New("test"), false},
+		{"empty custom error", New(""), true},
+		{"non-empty custom error", New("test"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if e, ok := tt.err.(*Error); ok {
+				defer e.Free()
+			}
+			if got := IsEmpty(tt.err); got != tt.expected {
+				t.Errorf("IsEmpty() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestPackageIsNull(t *testing.T) {
+	nullTime := sql.NullTime{Valid: false}
+	validTime := sql.NullTime{Time: time.Now(), Valid: true}
+
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{"nil error", nil, true},
+		{"std error", errors.New("test"), false},
+		{"custom error with NULL", New("").With("time", nullTime), true},
+		{"custom error with valid", New("").With("time", validTime), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if e, ok := tt.err.(*Error); ok {
+				defer e.Free()
+			}
+			if got := IsNull(tt.err); got != tt.expected {
+				t.Errorf("IsNull() = %v, want %v", got, tt.expected)
+			}
+		})
 	}
 }

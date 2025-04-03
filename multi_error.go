@@ -27,8 +27,22 @@ type ErrorFormatter func([]error) string
 // MultiErrorOption configures MultiError behavior during creation.
 type MultiErrorOption func(*MultiError)
 
-// Add appends an error to the collection with optional sampling and limit checks.
-// Ignores nil errors; thread-safe.
+// NewMultiError creates a new MultiError instance with optional configuration.
+// Initial capacity is set to 4; applies options in the order provided.
+func NewMultiError(opts ...MultiErrorOption) *MultiError {
+	m := &MultiError{
+		errors: make([]error, 0, 4),
+		limit:  0, // Unlimited by default
+	}
+
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// Add appends an error to the collection with optional sampling, limit checks, and duplicate prevention.
+// Ignores nil errors and duplicates; thread-safe.
 func (m *MultiError) Add(err error) {
 	if err == nil {
 		return
@@ -37,7 +51,14 @@ func (m *MultiError) Add(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Apply sampling if enabled and not the first error
+	// Check for duplicates
+	for _, e := range m.errors {
+		if e.Error() == err.Error() {
+			return
+		}
+	}
+
+	// Apply sampling
 	if m.sampling && len(m.errors) > 0 {
 		var r uint32
 		if m.rand != nil {
@@ -45,12 +66,12 @@ func (m *MultiError) Add(err error) {
 		} else {
 			r = fastRand() % 100
 		}
-		if r >= m.sampleRate {
+		if r > m.sampleRate { // Changed from >= to > to match percentage
 			return
 		}
 	}
 
-	// Apply limit if set
+	// Apply limit
 	if m.limit > 0 && len(m.errors) >= m.limit {
 		return
 	}
@@ -177,18 +198,32 @@ func (m *MultiError) Merge(other *MultiError) {
 	}
 }
 
-// NewMultiError creates a new MultiError instance with optional configuration.
-// Initial capacity is set to 4; applies options in the order provided.
-func NewMultiError(opts ...MultiErrorOption) *MultiError {
-	m := &MultiError{
-		errors: make([]error, 0, 4),
-		limit:  0, // Unlimited by default
+func (m *MultiError) IsNull() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Fast path for empty MultiError
+	if len(m.errors) == 0 {
+		return true
 	}
 
-	for _, opt := range opts {
-		opt(m)
+	// Check each error
+	for _, err := range m.errors {
+		switch e := err.(type) {
+		case interface{ IsNull() bool }:
+			if !e.IsNull() {
+				return false
+			}
+		case nil:
+			continue
+		default:
+			// For errors that don't implement IsNull(), check Error() string
+			if e.Error() != "" {
+				return false
+			}
+		}
 	}
-	return m
+	return true
 }
 
 // Single returns nil if the collection is empty, the single error if only one exists,

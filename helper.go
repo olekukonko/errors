@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 )
 
@@ -175,6 +174,33 @@ func IsError(err error) bool {
 	return ok
 }
 
+// IsEmpty checks if an error has no meaningful content
+func IsEmpty(err error) bool {
+	if err == nil {
+		return true
+	}
+	if e, ok := err.(*Error); ok {
+		return e.IsEmpty()
+	}
+	return strings.TrimSpace(err.Error()) == ""
+}
+
+// IsNull checks if an error is nil or represents a NULL value
+func IsNull(err error) bool {
+	if err == nil {
+		fmt.Println("Package IsNull: nil error, returning true")
+		return true
+	}
+	if e, ok := err.(*Error); ok {
+		result := e.IsNull()
+		fmt.Printf("Package IsNull: *Error result=%v\n", result)
+		return result
+	}
+	result := sqlNull(err)
+	fmt.Printf("Package IsNull: non-*Error, result=%v (err=%v)\n", result, err)
+	return result
+}
+
 // IsRetryable checks if an error is retryable.
 // For *Error, checks the context; otherwise, infers from timeout or "retry" in the message.
 func IsRetryable(err error) bool {
@@ -246,36 +272,6 @@ func Name(err error) string {
 		return e.name
 	}
 	return ""
-}
-
-// Null checks if an error is completely null/empty across all error types.
-// Handles nil errors, *Error types, sql.Null* types, and zero-valued errors.
-func Null(err error) bool {
-	if err == nil {
-		return true
-	}
-
-	// Use *Error's Null() method if applicable
-	if e, ok := err.(*Error); ok {
-		return e.Null()
-	}
-
-	// Check for sql.Null types (placeholder logic)
-	if sqlNull(err) {
-		return true
-	}
-
-	// Check for empty error messages
-	if err.Error() == "" {
-		return true
-	}
-
-	// Use reflection to detect nil concrete error types
-	val := reflect.ValueOf(err)
-	if val.Kind() == reflect.Ptr && val.IsNil() {
-		return true
-	}
-	return false
 }
 
 // UnwrapAll returns a slice of all errors in the chain, including the root error.
