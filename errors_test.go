@@ -731,6 +731,7 @@ func TestErrorFromContext(t *testing.T) {
 	})
 }
 
+// TestContextStorage checks `smallContext`and it's expansion
 func TestContextStorage(t *testing.T) {
 	t.Run("stores first 4 items in smallContext", func(t *testing.T) {
 		err := New("test")

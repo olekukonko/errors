@@ -477,7 +477,6 @@ func (e *Error) Free() {
 		stackPool.Put(e.stack[:cap(e.stack)])
 		e.stack = nil
 	}
-
 	errorPool.Put(e)
 }
 
