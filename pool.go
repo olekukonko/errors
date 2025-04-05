@@ -11,8 +11,8 @@ import (
 type ErrorPool struct {
 	pool      sync.Pool // Underlying pool for storing *Error instances
 	poolStats struct {  // Embedded struct for pool usage statistics
-		hits   int64 // Number of times an error was reused from the pool
-		misses int64 // Number of times a new error was created due to pool miss
+		hits   atomic.Int64 // Number of times an error was reused from the pool
+		misses atomic.Int64 // Number of times a new error was created due to pool miss
 	}
 }
 
@@ -41,12 +41,12 @@ func (ep *ErrorPool) Get() *Error {
 
 	e := ep.pool.Get().(*Error)
 	if e == nil { // Pool returned nil (unlikely due to New func, but handled for safety)
-		atomic.AddInt64(&ep.poolStats.misses, 1)
+		ep.poolStats.misses.Add(1)
 		return &Error{
 			smallContext: [contextSize]contextItem{},
 		}
 	}
-	atomic.AddInt64(&ep.poolStats.hits, 1)
+	ep.poolStats.hits.Add(1)
 	return e
 }
 
@@ -71,6 +71,5 @@ func (ep *ErrorPool) Put(e *Error) {
 // Stats returns the current pool statistics as hits and misses.
 // Thread-safe; uses atomic loads to ensure accurate counts.
 func (ep *ErrorPool) Stats() (hits, misses int64) {
-	return atomic.LoadInt64(&ep.poolStats.hits),
-		atomic.LoadInt64(&ep.poolStats.misses)
+	return ep.poolStats.hits.Load(), ep.poolStats.misses.Load()
 }

@@ -55,13 +55,20 @@ var (
 			return make([]uintptr, currentConfig.stackDepth)
 		},
 	}
+	emptyError = &Error{
+		smallContext: [contextSize]contextItem{},
+		msg:          "",
+		name:         "",
+		template:     "",
+		cause:        nil,
+	}
 )
 
-var bufferPool = sync.Pool{
-	New: func() interface{} {
-		return bytes.NewBuffer(make([]byte, 0, bufferSize))
-	},
-}
+//var bufferPool = sync.Pool{
+//	New: func() interface{} {
+//		return bytes.NewBuffer(make([]byte, 0, bufferSize))
+//	},
+//}
 
 // contextItem represents a single key-value pair in the smallContext array.
 type contextItem struct {
@@ -138,7 +145,7 @@ func newError() *Error {
 // Empty creates a new empty error with no stack trace.
 // Useful as a base for building errors incrementally.
 func Empty() *Error {
-	return newError()
+	return emptyError
 }
 
 // Named creates a new error with a specific name and stack trace.
@@ -152,6 +159,9 @@ func Named(name string) *Error {
 // New creates a fast, lightweight error without stack tracing.
 // Use instead of Trace() when stack traces aren't needed for better performance.
 func New(text string) *Error {
+	if text == "" {
+		return emptyError.Copy() // Global pre-allocated empty error
+	}
 	err := newError()
 	err.msg = text
 	return err
@@ -264,6 +274,12 @@ func (e *Error) Context() map[string]interface{} {
 // Copy creates a deep copy of the error, preserving all fields except stack.
 // The new error does not capture a new stack trace unless explicitly added.
 func (e *Error) Copy() *Error {
+	if e == emptyError {
+		return &Error{
+			smallContext: [contextSize]contextItem{},
+		}
+	}
+
 	newErr := newError()
 
 	newErr.msg = e.msg
@@ -520,7 +536,7 @@ func (e *Error) IsEmpty() bool {
 // IsNull checks if an error is nil or represents a SQL NULL value.
 // Considers both the error itself and any context values; returns true if all context is null.
 func (e *Error) IsNull() bool {
-	if e == nil {
+	if e == nil || e == emptyError {
 		return true
 	}
 	// If no context or cause, and no content, it's not null
@@ -576,42 +592,51 @@ func (e *Error) IsNull() bool {
 	return e.smallCount > 0 || e.context != nil
 }
 
+var (
+	jsonBufferPool = sync.Pool{
+		New: func() interface{} {
+			return bytes.NewBuffer(make([]byte, 0, bufferSize))
+		},
+	}
+)
+
 // MarshalJSON serializes the error to JSON, including name, message, context, cause, and stack.
 // Handles nested *Error causes and custom marshalers efficiently.
 func (e *Error) MarshalJSON() ([]byte, error) {
-	type jsonError struct {
+	// Get buffer from pool
+	buf := jsonBufferPool.Get().(*bytes.Buffer)
+	defer jsonBufferPool.Put(buf)
+	buf.Reset()
+
+	// Create new encoder each time (no Reset available)
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+
+	// Prepare error data
+	je := struct {
 		Name    string                 `json:"name,omitempty"`
 		Message string                 `json:"message,omitempty"`
 		Context map[string]interface{} `json:"context,omitempty"`
 		Cause   interface{}            `json:"cause,omitempty"`
 		Stack   []string               `json:"stack,omitempty"`
 		Code    int                    `json:"code,omitempty"`
-	}
-
-	var ctx map[string]interface{}
-	if e.smallCount > 0 || e.context != nil {
-		ctx = make(map[string]interface{}, e.smallCount)
-		for i := int32(0); i < e.smallCount && i < contextSize; i++ {
-			ctx[e.smallContext[i].key] = e.smallContext[i].value
-		}
-		if e.context != nil {
-			for k, v := range e.context {
-				ctx[k] = v
-			}
-		}
-	}
-
-	je := jsonError{
+	}{
 		Name:    e.name,
 		Message: e.msg,
-		Context: ctx,
 		Code:    e.Code(),
 	}
 
+	// Handle context
+	if ctx := e.Context(); len(ctx) > 0 {
+		je.Context = ctx
+	}
+
+	// Handle stack
 	if e.stack != nil {
 		je.Stack = e.Stack()
 	}
 
+	// Handle cause
 	if e.cause != nil {
 		switch c := e.cause.(type) {
 		case *Error:
@@ -623,49 +648,17 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 		}
 	}
 
-	buf := bufferPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer bufferPool.Put(buf)
-
-	encoder := json.NewEncoder(buf)
-	encoder.SetEscapeHTML(false)
-
-	if err := encoder.Encode(je); err != nil {
+	// Encode
+	if err := enc.Encode(je); err != nil {
 		return nil, err
 	}
 
+	// Return bytes without trailing newline
 	result := buf.Bytes()
 	if len(result) > 0 && result[len(result)-1] == '\n' {
 		result = result[:len(result)-1]
 	}
 	return result, nil
-}
-
-// Merge combines this error with another, aggregating context and stack.
-// Returns a new *Error; original error remains unchanged.
-func (e *Error) Merge(other error) *Error {
-	if other == nil {
-		return e.Copy()
-	}
-	result := e.Copy()
-	if o, ok := other.(*Error); ok {
-		result.msg = e.Error() + "; " + o.Error()
-		if o.stack != nil && result.stack == nil {
-			result.WithStack()
-		}
-		if ctx := o.Context(); ctx != nil {
-			for k, v := range ctx {
-				result.With(k, v)
-			}
-		}
-		if o.cause != nil {
-			result.Wrap(o.cause)
-		}
-	} else {
-		result.msg = e.Error() + "; " + other.Error()
-		result.Wrap(other)
-	}
-	return result
 }
 
 // Msgf sets the error message using a formatted string.
@@ -826,26 +819,31 @@ func (e *Error) Walk(fn func(error)) {
 // With adds a key-value pair to the error's context.
 // Uses smallContext for efficiency until full, then switches to map; thread-safe.
 func (e *Error) With(key string, value interface{}) *Error {
+	// Fast path for small context (no map needed)
+	if e.smallCount < contextSize && e.context == nil {
+		e.mu.Lock()
+		// Double-check after acquiring lock
+		if e.smallCount < contextSize && e.context == nil {
+			e.smallContext[e.smallCount] = contextItem{key, value}
+			e.smallCount++
+			e.mu.Unlock()
+			return e
+		}
+		e.mu.Unlock()
+	}
+
+	// Slow path - requires map
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// First 4 items go to smallContext
-	if e.smallCount < contextSize {
-		e.smallContext[e.smallCount] = contextItem{key, value}
-		e.smallCount++
-		return e
-	}
-
-	// 5th item triggers migration to map
 	if e.context == nil {
 		e.context = make(map[string]interface{}, currentConfig.contextSize)
-		// Migrate all existing items from smallContext
+		// Migrate existing items if any
 		for i := int32(0); i < e.smallCount; i++ {
 			e.context[e.smallContext[i].key] = e.smallContext[i].value
 		}
 	}
 
-	// Store new item in map
 	e.context[key] = value
 	return e
 }

@@ -3,6 +3,7 @@ package errors
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -196,5 +197,23 @@ func BenchmarkPoolGetPut(b *testing.B) {
 func BenchmarkStackAlloc(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = make([]uintptr, 0, currentConfig.stackDepth)
+	}
+}
+
+func BenchmarkContext_Concurrent(b *testing.B) {
+	err := New("base")
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			err.With(fmt.Sprintf("key%d", i%10), i)
+			i++
+		}
+	})
+}
+
+func BenchmarkPoolWarmup(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		errorPool = NewErrorPool() // Reset pool
+		WarmPool(100)
 	}
 }
