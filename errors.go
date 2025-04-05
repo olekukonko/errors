@@ -175,6 +175,20 @@ func Newf(format string, args ...interface{}) *Error {
 	return err
 }
 
+// Std creates a standard error using errors.New, provided for backward compatibility.
+// This function serves as a lightweight wrapper around the standard library's error creation,
+// allowing users to opt into basic error handling without adopting the full features of this package.
+func Std(text string) error {
+	return errors.New(text)
+}
+
+// Stdf creates a formatted standard error using fmt.Errorf, provided for backward compatibility.
+// This function wraps the standard library's formatted error creation, offering a simple alternative
+// to the package's enhanced error handling while maintaining compatibility with existing codebases.
+func Stdf(format string, a ...interface{}) error {
+	return fmt.Errorf(format, a...)
+}
+
 // Trace creates an error with stack trace capture enabled.
 // Use when call stacks are needed for debugging; has performance overhead.
 func Trace(text string) *Error {
