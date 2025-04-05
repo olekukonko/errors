@@ -7,6 +7,7 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -726,6 +727,92 @@ func TestErrorFromContext(t *testing.T) {
 
 		if !HasContextKey(cerr, "cancelled") {
 			t.Error("Expected cancelled flag")
+		}
+	})
+}
+
+func TestContextStorage(t *testing.T) {
+	t.Run("stores first 4 items in smallContext", func(t *testing.T) {
+		err := New("test")
+
+		err.With("a", 1)
+		err.With("b", 2)
+		err.With("c", 3)
+		err.With("d", 4)
+
+		if err.smallCount != 4 {
+			t.Errorf("expected smallCount=4, got %d", err.smallCount)
+		}
+		if err.context != nil {
+			t.Error("expected context map to be nil")
+		}
+	})
+
+	t.Run("switches to map on 5th item", func(t *testing.T) {
+		err := New("test")
+
+		err.With("a", 1)
+		err.With("b", 2)
+		err.With("c", 3)
+		err.With("d", 4)
+		err.With("e", 5)
+
+		if err.context == nil {
+			t.Error("expected context map to be initialized")
+		}
+		if len(err.context) != 5 {
+			t.Errorf("expected 5 items in map, got %d", len(err.context))
+		}
+	})
+
+	t.Run("preserves all context items", func(t *testing.T) {
+		err := New("test")
+		items := []struct {
+			k string
+			v interface{}
+		}{
+			{"a", 1}, {"b", 2}, {"c", 3},
+			{"d", 4}, {"e", 5}, {"f", 6},
+		}
+
+		for _, item := range items {
+			err.With(item.k, item.v)
+		}
+
+		ctx := err.Context()
+		if len(ctx) != len(items) {
+			t.Errorf("expected %d items, got %d", len(items), len(ctx))
+		}
+		for _, item := range items {
+			if val, ok := ctx[item.k]; !ok || val != item.v {
+				t.Errorf("missing item %s in context", item.k)
+			}
+		}
+	})
+
+	t.Run("concurrent access", func(t *testing.T) {
+		err := New("test")
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			err.With("a", 1)
+			err.With("b", 2)
+			err.With("c", 3)
+		}()
+
+		go func() {
+			defer wg.Done()
+			err.With("d", 4)
+			err.With("e", 5)
+			err.With("f", 6)
+		}()
+
+		wg.Wait()
+		ctx := err.Context()
+		if len(ctx) != 6 {
+			t.Errorf("expected 6 items, got %d", len(ctx))
 		}
 	})
 }

@@ -829,21 +829,23 @@ func (e *Error) With(key string, value interface{}) *Error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// First 4 items go to smallContext
 	if e.smallCount < contextSize {
 		e.smallContext[e.smallCount] = contextItem{key, value}
 		e.smallCount++
 		return e
 	}
-	if e.smallCount == contextSize && e.context == nil {
+
+	// 5th item triggers migration to map
+	if e.context == nil {
 		e.context = make(map[string]interface{}, currentConfig.contextSize)
+		// Migrate all existing items from smallContext
 		for i := int32(0); i < e.smallCount; i++ {
 			e.context[e.smallContext[i].key] = e.smallContext[i].value
 		}
-		e.smallCount = 3 // Note: This seems like a bug; should probably not reset
 	}
-	if e.context == nil {
-		e.context = make(map[string]interface{}, currentConfig.contextSize)
-	}
+
+	// Store new item in map
 	e.context[key] = value
 	return e
 }
