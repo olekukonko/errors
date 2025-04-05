@@ -57,14 +57,18 @@ go get github.com/olekukonko/errors@latest
 package main
 
 import (
-	"fmt"
-	"github.com/olekukonko/errors"
+  "fmt"
+  "github.com/olekukonko/errors"
 )
 
 func main() {
-	// Create a simple error without stack trace (fast)
-	err := errors.New("connection failed")
-	fmt.Println(err) // Output: "connection failed"
+  // Fast error with no stack trace
+  err := errors.New("connection failed")
+  fmt.Println(err) // "connection failed"
+
+  // Standard error, no allocation, same speed
+  stdErr := errors.Std("connection failed")
+  fmt.Println(stdErr) // "connection failed"
 }
 ```
 
@@ -73,14 +77,18 @@ func main() {
 package main
 
 import (
-	"fmt"
-	"github.com/olekukonko/errors"
+  "fmt"
+  "github.com/olekukonko/errors"
 )
 
 func main() {
-	// Create a formatted error without stack trace
-	err := errors.Newf("user %s not found", "bob")
-	fmt.Println(err) // Output: "user bob not found"
+  // Formatted error without stack trace
+  err := errors.Newf("user %s not found", "bob")
+  fmt.Println(err) // Output: "user bob not found"
+
+  // Standard formatted error, no fmt.Errorf needed
+  stdErr := errors.Stdf("user %s not found", "bob")
+  fmt.Println(stdErr) // Output: "user bob not found"
 }
 ```
 
@@ -89,15 +97,21 @@ func main() {
 package main
 
 import (
-	"fmt"
-	"github.com/olekukonko/errors"
+  "fmt"
+  "github.com/olekukonko/errors"
 )
 
 func main() {
-	// Create an error with stack trace
-	err := errors.Trace("critical issue")
-	fmt.Println(err)         // Output: "critical issue"
-	fmt.Println(err.Stack()) // Output: e.g., ["main.go:15", "caller.go:42"]
+  // Create an error with stack trace using Trace
+  err := errors.Trace("critical issue")
+  fmt.Println(err)         // Output: "critical issue"
+  fmt.Println(err.Stack()) // Output: e.g., ["main.go:15", "caller.go:42"]
+
+  // Convert basic error to traceable with WithStack
+  errS := errors.New("critical issue")
+  errS = errS.WithStack()   // Add stack trace and update error
+  fmt.Println(errS)         // Output: "critical issue"
+  fmt.Println(errS.Stack()) // Output: e.g., ["main.go:19", "caller.go:42"]
 }
 ```
 
