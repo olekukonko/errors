@@ -3,79 +3,24 @@ package errors
 import (
 	"context"
 	"fmt"
-	"log/slog" // Structured logging package
-	"os"
-	"reflect" // For runtime type inspection and function wrapping
+	"log/slog" // Standard structured logging package
+	"reflect"
 	"strings"
 	"time"
 )
 
-// ChainLogger defines the interface for logging errors within the Chain.
-// This abstraction allows different logging implementations to be used.
-type ChainLogger interface {
-	// LogError logs an error with a message and optional attributes.
-	LogError(err error, msg string, attrs ...slog.Attr)
-}
-
-// defaultLogger provides a default implementation of ChainLogger using slog.
-// It serves as a fallback logger when no custom logger is provided.
-type defaultLogger struct {
-	logger *slog.Logger // Underlying slog logger instance
-}
-
-// newDefaultLogger creates a new defaultLogger with the given handler.
-// If no handler is provided, it defaults to a text handler writing to stderr.
-func newDefaultLogger(handler slog.Handler) *defaultLogger {
-	if handler == nil {
-		// Fallback to a text handler outputting to stderr with default settings
-		handler = slog.NewTextHandler(os.Stderr, nil)
-	}
-	return &defaultLogger{
-		logger: slog.New(handler), // Initialize slog with the handler
-	}
-}
-
-// LogError implements the ChainLogger interface for defaultLogger.
-// It logs the error with a timestamp and additional attributes, handling nil cases and panics gracefully.
-func (d *defaultLogger) LogError(err error, msg string, attrs ...slog.Attr) {
-	// Check for nil logger or error to prevent crashes
-	if d == nil || d.logger == nil || err == nil {
-		// Print a warning to stdout instead of logging
-		fmt.Printf("WARN: Logging skipped - logger=%v, err=%v\n", d, err)
-		return
-	}
-
-	// Prepare attributes, including the error and timestamp
-	allAttrs := make([]slog.Attr, 0, len(attrs)+2)
-	allAttrs = append(allAttrs, slog.Any("error", err))             // Include the error object
-	allAttrs = append(allAttrs, slog.Time("timestamp", time.Now())) // Add current timestamp
-	allAttrs = append(allAttrs, attrs...)                           // Append any additional attributes
-
-	// Use defer to catch any panics that occur during logging
-	defer func() {
-		if r := recover(); r != nil {
-			// Log panic details to stdout to avoid infinite recursion
-			fmt.Printf("ERROR: Recovered from panic during logging: %v\nAttributes: %v\n", r, allAttrs)
-		}
-	}()
-
-	// Log the error at the ERROR level with all attributes
-	d.logger.LogAttrs(context.Background(), slog.LevelError, msg, allAttrs...)
-}
-
 // Chain executes functions sequentially with enhanced error handling.
-// It supports timeouts, retries, logging, and optional steps.
+// Logging is optional and configured via a slog.Handler.
 type Chain struct {
-	steps    []chainStep        // List of steps to execute
-	errors   []error            // Accumulated errors during execution
-	config   chainConfig        // Chain-wide configuration
-	lastStep *chainStep         // Pointer to the last added step for configuration
-	logger   ChainLogger        // Logger for error reporting
-	cancel   context.CancelFunc // Function to cancel the context
+	steps      []chainStep        // List of steps to execute
+	errors     []error            // Accumulated errors during execution
+	config     chainConfig        // Chain-wide configuration
+	lastStep   *chainStep         // Pointer to the last added step for configuration
+	logHandler slog.Handler       // Optional logging handler (nil means no logging)
+	cancel     context.CancelFunc // Function to cancel the context
 }
 
 // chainStep represents a single step in the chain.
-// It includes the function to execute and its configuration.
 type chainStep struct {
 	execute  func() error // Function to execute for this step
 	optional bool         // If true, errors don't stop the chain
@@ -84,10 +29,9 @@ type chainStep struct {
 
 // chainConfig holds chain-wide settings.
 type chainConfig struct {
-	timeout    time.Duration // Maximum duration for the entire chain
-	maxErrors  int           // Maximum number of errors before stopping (-1 for unlimited)
-	autoWrap   bool          // Whether to automatically wrap errors with additional context
-	logHandler slog.Handler  // Custom slog handler for logging
+	timeout   time.Duration // Maximum duration for the entire chain
+	maxErrors int           // Maximum number of errors before stopping (-1 for unlimited)
+	autoWrap  bool          // Whether to automatically wrap errors with additional context
 }
 
 // stepConfig holds configuration for an individual step.
@@ -102,31 +46,30 @@ type stepConfig struct {
 }
 
 // ChainOption defines a function that configures a Chain.
-// This allows for flexible chain configuration during creation.
 type ChainOption func(*Chain)
 
 // NewChain creates a new Chain with the given options.
-// It initializes default settings and applies provided options.
+// Logging is disabled by default (logHandler is nil).
 func NewChain(opts ...ChainOption) *Chain {
 	c := &Chain{
 		config: chainConfig{
 			autoWrap:  true, // Enable error wrapping by default
 			maxErrors: -1,   // No limit on errors by default
 		},
+		// logHandler is nil, meaning no logging unless explicitly configured
 	}
 	// Apply each configuration option
 	for _, opt := range opts {
 		opt(c)
 	}
-	// Initialize the logger with the configured handler (or default)
-	c.logger = newDefaultLogger(c.config.logHandler)
 	return c
 }
 
-// ChainWithLogHandler sets a custom slog handler for the chain's logger.
+// ChainWithLogHandler sets a custom slog.Handler for logging.
+// If handler is nil, logging is effectively disabled.
 func ChainWithLogHandler(handler slog.Handler) ChainOption {
 	return func(c *Chain) {
-		c.config.logHandler = handler
+		c.logHandler = handler
 	}
 }
 
@@ -261,26 +204,24 @@ func (c *Chain) Code(code int) *Chain {
 }
 
 // Retry configures retry behavior for the last step.
+// Retry configures retry behavior for the last step.
 func (c *Chain) Retry(maxAttempts int, delay time.Duration, opts ...RetryOption) *Chain {
 	if c.lastStep == nil {
-		// Panic if no step exists to configure
 		panic("Chain.Retry: must call Step() or Call() before Retry()")
 	}
 	if maxAttempts < 1 {
-		// Ensure at least one attempt
 		maxAttempts = 1
 	}
 
 	// Define default retry options
 	retryOpts := []RetryOption{
-		WithMaxAttempts(maxAttempts), // Set maximum retry attempts
-		WithDelay(delay),             // Set delay between retries
-		// Only retry errors marked as retryable
+		WithMaxAttempts(maxAttempts),
+		WithDelay(delay),
 		WithRetryIf(func(err error) bool { return IsRetryable(err) }),
 	}
 
-	// Add logging for retry attempts if a logger is available
-	if c.logger != nil {
+	// Add logging for retry attempts if a handler is configured
+	if c.logHandler != nil {
 		step := c.lastStep
 		retryOpts = append(retryOpts, WithOnRetry(func(attempt int, err error) {
 			// Prepare logging attributes
@@ -365,48 +306,43 @@ func (c *Chain) Run() error {
 // RunAll executes all steps, collecting errors without stopping.
 // It returns a MultiError containing all errors or nil if none occurred.
 func (c *Chain) RunAll() error {
-	// Create a context with timeout or cancellation
 	ctx, cancel := c.getContextAndCancel()
 	defer cancel()
 	c.cancel = cancel
-	// Clear any previous errors
 	c.errors = c.errors[:0]
-	// Initialize a MultiError to collect errors
 	multi := NewMultiError()
 
-	// Execute each step
 	for i := range c.steps {
 		step := &c.steps[i]
-		// Check if the context has been canceled
 		select {
 		case <-ctx.Done():
 			err := ctx.Err()
-			// Enhance the error with step context
 			enhancedErr := c.enhanceError(err, step)
 			c.errors = append(c.errors, enhancedErr)
 			multi.Add(enhancedErr)
-			// Log the context error
 			c.logError(enhancedErr, "Chain stopped due to context error before step (RunAll)", step.config)
 			goto endRunAll
 		default:
 		}
 
-		// Execute the step
 		err := c.executeStep(ctx, step)
 		if err != nil {
-			// Enhance the error with step context
 			enhancedErr := c.enhanceError(err, step)
 			c.errors = append(c.errors, enhancedErr)
 			multi.Add(enhancedErr)
-			// Log the error if configured
-			if step.config.logOnFail && c.logger != nil {
+			if step.config.logOnFail && c.logHandler != nil {
 				c.logError(enhancedErr, "Step failed during RunAll", step.config)
 			}
-			// Check if the maximum error limit has been reached
 			if c.config.maxErrors > 0 && multi.Count() >= c.config.maxErrors {
-				if c.logger != nil {
-					// Log that the maximum error limit was reached
-					c.logger.LogError(multi.Single(), fmt.Sprintf("Stopping RunAll after reaching max errors (%d)", c.config.maxErrors), slog.Int("max_errors", c.config.maxErrors))
+				if c.logHandler != nil {
+					// Create a logger to log the max errors condition
+					logger := slog.New(c.logHandler)
+					logger.LogAttrs(
+						context.Background(),
+						slog.LevelError,
+						fmt.Sprintf("Stopping RunAll after reaching max errors (%d)", c.config.maxErrors),
+						slog.Int("max_errors", c.config.maxErrors),
+					)
 				}
 				goto endRunAll
 			}
@@ -414,7 +350,6 @@ func (c *Chain) RunAll() error {
 	}
 
 endRunAll:
-	// Return the collected errors or nil
 	return multi.Single()
 }
 
@@ -478,49 +413,58 @@ func (c *Chain) getContextAndCancel() (context.Context, context.CancelFunc) {
 }
 
 // logError logs an error with step-specific context and attributes.
+// It only logs if a handler is configured and the error is non-nil.
 func (c *Chain) logError(err error, msg string, config stepConfig, additionalAttrs ...slog.Attr) {
-	if c.logger == nil || err == nil {
-		// Skip logging if no logger or error
+	// Skip logging if no handler is set or error is nil
+	if c == nil || c.logHandler == nil || err == nil {
 		return
 	}
 
-	// Prepare attributes for logging
-	attrs := make([]slog.Attr, 0, 5+len(config.logAttrs)+len(additionalAttrs))
+	// Create a logger on demand using the configured handler
+	logger := slog.New(c.logHandler)
+
+	// Initialize attributes with error and timestamp
+	allAttrs := make([]slog.Attr, 0, 5+len(config.logAttrs)+len(additionalAttrs))
+	allAttrs = append(allAttrs, slog.Any("error", err))
+	allAttrs = append(allAttrs, slog.Time("timestamp", time.Now()))
+
+	// Add step-specific metadata
 	if config.category != "" {
-		// Include error category if set
-		attrs = append(attrs, slog.String("category", string(config.category)))
+		allAttrs = append(allAttrs, slog.String("category", string(config.category)))
 	}
 	if config.code != 0 {
-		// Include error code if set
-		attrs = append(attrs, slog.Int("code", config.code))
+		allAttrs = append(allAttrs, slog.Int("code", config.code))
 	}
-	// Include step context
 	for k, v := range config.context {
-		attrs = append(attrs, slog.Any(k, v))
+		allAttrs = append(allAttrs, slog.Any(k, v))
 	}
-	// Include step-specific logging attributes
-	attrs = append(attrs, config.logAttrs...)
-	// Include any additional attributes
-	attrs = append(attrs, additionalAttrs...)
+	allAttrs = append(allAttrs, config.logAttrs...)
+	allAttrs = append(allAttrs, additionalAttrs...)
 
-	// If the error is of type *Error, include stack trace and name
+	// Add stack trace and error name if the error is of type *Error
 	if e, ok := err.(*Error); ok {
 		if stack := e.Stack(); len(stack) > 0 {
-			// Format the stack trace, truncating if too long
+			// Format stack trace, truncating if too long
 			stackStr := "\n\t" + strings.Join(stack, "\n\t")
 			if len(stackStr) > 1000 {
 				stackStr = stackStr[:1000] + "..."
 			}
-			attrs = append(attrs, slog.String("stacktrace", stackStr))
+			allAttrs = append(allAttrs, slog.String("stacktrace", stackStr))
 		}
 		if name := e.Name(); name != "" {
-			// Include error name if set
-			attrs = append(attrs, slog.String("error_name", name))
+			allAttrs = append(allAttrs, slog.String("error_name", name))
 		}
 	}
 
-	// Log the error with all attributes
-	c.logger.LogError(err, msg, attrs...)
+	// Log the error at ERROR level with all attributes
+	// Use a defer to catch any panics during logging
+	defer func() {
+		if r := recover(); r != nil {
+			// Print to stdout to avoid infinite recursion
+			fmt.Printf("ERROR: Recovered from panic during logging: %v\nAttributes: %v\n", r, allAttrs)
+		}
+	}()
+	logger.LogAttrs(context.Background(), slog.LevelError, msg, allAttrs...)
 }
 
 // wrapCallable wraps a function and its arguments into an executable step.
