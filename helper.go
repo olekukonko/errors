@@ -31,7 +31,7 @@ func Code(err error) int {
 	if e, ok := err.(*Error); ok {
 		return e.Code()
 	}
-	return 500
+	return DefaultCode
 }
 
 // Context extracts the context map from an error, if it is an *Error.
@@ -63,7 +63,12 @@ func Convert(err error) *Error {
 	}
 
 	// Manual unwrapping as fallback
+	visited := make(map[error]bool)
 	for unwrapped := err; unwrapped != nil; {
+		if visited[unwrapped] {
+			break // Cycle detected
+		}
+		visited[unwrapped] = true
 		if e, ok := unwrapped.(*Error); ok {
 			return e
 		}
