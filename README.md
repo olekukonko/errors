@@ -1081,7 +1081,7 @@ func main() {
 }
 ```
 
-#### Sequential Task Processing 
+#### Sequential Task Processing 2
 ```go
 package main
 
