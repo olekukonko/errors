@@ -234,11 +234,15 @@ func IsRetryable(err error) bool {
 				}
 			}
 		}
-		// Fallback to context map
+		// Check regular context
 		if e.context != nil {
 			if val, ok := e.context[ctxRetry].(bool); ok {
 				return val
 			}
+		}
+		// Check cause recursively
+		if e.cause != nil {
+			return IsRetryable(e.cause)
 		}
 	}
 	lowerMsg := strings.ToLower(err.Error())

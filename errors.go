@@ -204,18 +204,19 @@ func New(text string) *Error {
 
 // Newf creates a formatted error, supporting the %w verb for wrapping errors.
 // If the format contains exactly one %w verb with a non-nil error argument,
-// the error is wrapped as the cause, and the message excludes the %w part.
-// The final Error() output combines the formatted message and cause.
-// Does not capture a stack trace.
+// the error is wrapped as the cause. The final error message string generated
+// by Error() will be compatible with the output of fmt.Errorf for the same inputs.
+// Does not capture a stack trace by default.
 // Example:
 //
 //	cause := errors.New("db error")
 //	err := errors.Newf("query failed: %w", cause)
-//	// err.Error() == "query failed: db error"
+//	// err.Error() will match fmt.Errorf("query failed: %w", cause).Error()
+//	// errors.Unwrap(err) == cause
 func Newf(format string, args ...interface{}) *Error {
 	err := newError()
 
-	// Scan for %w and validate arguments.
+	// --- Start: Parsing and Validation (mostly unchanged) ---
 	var wCount int
 	var wArgPos = -1
 	var wArg error
@@ -226,8 +227,8 @@ func Newf(format string, args ...interface{}) *Error {
 	parsingOk := true
 	var fmtVerbs []struct {
 		isW    bool
-		spec   string
-		argIdx int
+		spec   string // The full verb specifier or literal segment
+		argIdx int    // Index in the original 'args' slice, -1 for literals/%%
 	}
 
 	// Parse format string to identify verbs and literals.
@@ -248,7 +249,8 @@ func Newf(format string, args ...interface{}) *Error {
 				i += 2
 				continue
 			}
-			i++
+			i++ // Move past '%'
+			// Parse flags, width, precision (simplified loop)
 			for i < len(runes) && strings.ContainsRune("+- #0", runes[i]) {
 				i++
 			}
@@ -263,24 +265,27 @@ func Newf(format string, args ...interface{}) *Error {
 			verb := runes[i]
 			specifierEndIndex := i + 1
 			fullSpec := string(runes[segmentStart:specifierEndIndex])
+			// Check if the verb consumes an argument
 			currentVerbConsumesArg := strings.ContainsRune("vTtbcdoqxXUeEfFgGspw", verb)
 			currentArgIdx := -1
 			isWVerb := false
+
 			if verb == 'w' {
 				isWVerb = true
 				wCount++
 				if wCount == 1 {
-					wArgPos = argPos
+					wArgPos = argPos // Record position of the error argument
 				} else {
 					parsingOk = false
 					validationErrorMsg = "multiple %w"
 					break
 				}
 			}
+
 			if currentVerbConsumesArg {
 				if argPos >= len(args) {
 					parsingOk = false
-					if wArgPos == argPos {
+					if isWVerb { // More specific message for missing %w arg
 						validationErrorMsg = "missing %w argument"
 					} else {
 						validationErrorMsg = fmt.Sprintf("missing argument for %s", string(verb))
@@ -295,17 +300,18 @@ func Newf(format string, args ...interface{}) *Error {
 						validationErrorMsg = "bad %w argument type"
 						break
 					}
-					wArg = cause
+					wArg = cause // Store the actual error argument
 				}
-				argPos++
+				argPos++ // Consume the argument position
 			}
 			fmtVerbs = append(fmtVerbs, struct {
 				isW    bool
 				spec   string
 				argIdx int
 			}{isW: isWVerb, spec: fullSpec, argIdx: currentArgIdx})
-			i = specifierEndIndex
+			i = specifierEndIndex // Move past the verb character
 		} else {
+			// Handle literal segment
 			literalStart := i
 			for i < len(runes) && runes[i] != '%' {
 				i++
@@ -317,6 +323,8 @@ func Newf(format string, args ...interface{}) *Error {
 			}{isW: false, spec: string(runes[literalStart:i]), argIdx: -1})
 		}
 	}
+
+	// Check for too many arguments after parsing
 	if parsingOk && argPos < len(args) {
 		parsingOk = false
 		validationErrorMsg = fmt.Sprintf("too many arguments for format %q", format)
@@ -334,59 +342,65 @@ func Newf(format string, args ...interface{}) *Error {
 			if wArgPos >= 0 && wArgPos < len(args) && args[wArgPos] != nil {
 				argValStr = fmt.Sprintf("(%T)", args[wArgPos])
 			} else if wArgPos >= len(args) {
-				argValStr = "(missing)"
+				argValStr = "(missing)" // Should be caught by "missing %w argument" case
 			}
 			err.msg = fmt.Sprintf("errors.Newf: argument %d for %%w is not a non-nil error %s", wArgPos, argValStr)
 		case "ends with %":
 			err.msg = fmt.Sprintf("errors.Newf: format %q ends with %%", format)
 		case "ends mid-specifier":
 			err.msg = fmt.Sprintf("errors.Newf: format %q ends during verb specifier", format)
-		default:
+		default: // Includes "too many arguments" and other potential fmt issues
 			err.msg = fmt.Sprintf("errors.Newf: error in format %q: %s", format, validationErrorMsg)
 		}
-		err.cause = nil
+		err.cause = nil // Ensure no cause is set on format error
+		err.formatWrapped = false
 		return err
 	}
+	// --- End: Parsing and Validation ---
 
-	// Process valid format string.
+	// --- Start: Processing Valid Format String ---
 	if wCount == 1 && wArg != nil {
-		// Handle %w: wrap the cause and format without %w.
-		err.cause = wArg
-		err.formatWrapped = true
+		// --- Handle %w: Simulate for Sprintf and pre-format ---
+		err.cause = wArg         // Set the cause for unwrapping
+		err.formatWrapped = true // Signal that msg is the final formatted string
 
-		var reducedFormat strings.Builder
-		var reducedArgs []interface{}
+		var finalFormat strings.Builder
+		var finalArgs []interface{}
+		causeStr := wArg.Error() // Get the string representation of the cause
 
-		// Build reduced format excluding %w.
+		// Rebuild format string and argument list for Sprintf
 		for _, verb := range fmtVerbs {
 			if verb.isW {
-				continue
-			}
-			reducedFormat.WriteString(verb.spec)
-			if verb.argIdx != -1 {
-				reducedArgs = append(reducedArgs, args[verb.argIdx])
+				// Replace the %w verb specifier (e.g., "%w", "%+w") with "%s"
+				finalFormat.WriteString("%s")
+				// Add the cause's *string* to the arguments list for the new %s
+				finalArgs = append(finalArgs, causeStr)
+			} else {
+				// Keep the original literal segment or non-%w verb specifier
+				finalFormat.WriteString(verb.spec)
+				if verb.argIdx != -1 {
+					// Add the original argument for this non-%w verb/literal
+					finalArgs = append(finalArgs, args[verb.argIdx])
+				}
 			}
 		}
 
-		rawReducedFormat := reducedFormat.String()
-
-		// Format the reduced string.
-		if rawReducedFormat != "" || len(reducedArgs) > 0 {
-			result, fmtErr := FmtErrorCheck(rawReducedFormat, reducedArgs...)
-			if fmtErr != nil {
-				err.msg = fmt.Sprintf("errors.Newf: formatting error with reduced format %q for original %q: %v", rawReducedFormat, format, fmtErr)
-				err.cause = nil
-				err.formatWrapped = false
-				return err
-			}
-			// Normalize whitespace in the message.
-			cleanedResult := spaceRe.ReplaceAllString(result, " ")
-			err.msg = strings.TrimSpace(cleanedResult)
+		// Format using the *modified* format string and arguments list
+		result, fmtErr := FmtErrorCheck(finalFormat.String(), finalArgs...)
+		if fmtErr != nil {
+			// Handle potential errors during the final formatting step
+			// This is unlikely if parsing passed, but possible with complex verbs/args
+			err.msg = fmt.Sprintf("errors.Newf: formatting error during %%w simulation for format %q: %v", format, fmtErr)
+			err.cause = nil // Don't keep the cause if final formatting failed
+			err.formatWrapped = false
 		} else {
-			err.msg = ""
+			// Store the final, fully formatted string, matching fmt.Errorf output
+			err.msg = result
 		}
+		// --- End %w Simulation ---
+
 	} else {
-		// No %w: format directly.
+		// --- No %w or wArg is nil: Format directly (original logic) ---
 		result, fmtErr := FmtErrorCheck(format, args...)
 		if fmtErr != nil {
 			err.msg = fmt.Sprintf("errors.Newf: formatting error for format %q: %v", format, fmtErr)
@@ -394,8 +408,10 @@ func Newf(format string, args ...interface{}) *Error {
 			err.formatWrapped = false
 		} else {
 			err.msg = result
+			err.formatWrapped = false // Ensure false if no %w was involved
 		}
 	}
+	// --- End: Processing Valid Format String ---
 
 	return err
 }
@@ -669,20 +685,26 @@ func (e *Error) Err() error {
 	return e
 }
 
-// Error returns the string representation of the error, combining message, template,
-// name, and cause. Invokes any set callback.
-// Format: "message: cause" if both exist, else message, template, name, or cause.
-// Example:
-//
-//	err := errors.New("failed").Wrap(errors.New("cause"))
-//	// err.Error() == "failed: cause"
+// Error returns the string representation of the error.
+// If the error was created using Newf/Errorf with the %w verb, it returns the
+// pre-formatted string compatible with fmt.Errorf.
+// Otherwise, it combines the message, template, or name with the cause's error
+// string, separated by ": ". Invokes any set callback.
 func (e *Error) Error() string {
 	if e.callback != nil {
 		e.callback()
 	}
 
+	// If created by Newf/Errorf with %w, msg already contains the final string.
+	if e.formatWrapped {
+		return e.msg // Return the pre-formatted fmt.Errorf-compatible string
+	}
+
+	// --- Original logic for errors not created via Newf("%w", ...) ---
+	// --- or errors created via New/Named and then Wrap() called. ---
 	var buf strings.Builder
 
+	// Append primary message part (msg, template, or name)
 	if e.msg != "" {
 		buf.WriteString(e.msg)
 	} else if e.template != "" {
@@ -691,11 +713,17 @@ func (e *Error) Error() string {
 		buf.WriteString(e.name)
 	}
 
+	// Append cause if it exists (only relevant if not formatWrapped)
 	if e.cause != nil {
 		if buf.Len() > 0 {
+			// Add separator only if there was a prefix message/name/template
 			buf.WriteString(": ")
 		}
 		buf.WriteString(e.cause.Error())
+	} else if buf.Len() == 0 {
+		// Handle case where msg/template/name are empty AND cause is nil
+		// Could return a specific string like "[empty error]" or just ""
+		return "" // Return empty string for a truly empty error
 	}
 
 	return buf.String()

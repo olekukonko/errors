@@ -910,9 +910,14 @@ func TestContextStorage(t *testing.T) {
 }
 
 // TestNewf verifies Newf behavior, including %w wrapping, formatting, and error cases.
+// errors_test.go
+
+// TestNewf verifies Newf behavior, including %w wrapping, formatting, and error cases.
+// It now expects the string output for %w cases to match fmt.Errorf.
 func TestNewf(t *testing.T) {
+	// Reusable error instances for testing %w
 	stdErrorInstance := errors.New("std error")
-	customErrorInstance := New("custom error")
+	customErrorInstance := New("custom error") // Assuming this exists in your tests
 	firstErrorInstance := New("first")
 	secondErrorInstance := New("second")
 
@@ -920,18 +925,18 @@ func TestNewf(t *testing.T) {
 		name            string
 		format          string
 		args            []interface{}
-		wantFinalMsg    string
-		wantInternalMsg string
+		wantFinalMsg    string // EXPECTATION UPDATED TO MATCH fmt.Errorf
+		wantInternalMsg string // This field might be less relevant now, maybe remove? Kept for reference.
 		wantCause       error
-		wantErrFormat   bool
+		wantErrFormat   bool // Indicates if Newf itself should return a format error message
 	}{
-		// Basic formatting.
+		// Basic formatting (no change needed)
 		{
 			name:            "simple string",
 			format:          "simple %s",
 			args:            []interface{}{"test"},
 			wantFinalMsg:    "simple test",
-			wantInternalMsg: "simple test",
+			wantInternalMsg: "simple test", // Stays same as FinalMsg when no %w
 		},
 		{
 			name:            "complex format without %w",
@@ -948,57 +953,57 @@ func TestNewf(t *testing.T) {
 			wantInternalMsg: "",
 		},
 
-		// %w wrapping cases.
+		// --- %w wrapping cases (EXPECTATIONS UPDATED) ---
 		{
 			name:            "wrap standard error",
 			format:          "prefix %w",
 			args:            []interface{}{stdErrorInstance},
-			wantFinalMsg:    "prefix: std error",
-			wantInternalMsg: "prefix",
+			wantFinalMsg:    "prefix std error", // Matches fmt.Errorf output
+			wantInternalMsg: "prefix std error", // Now wantInternalMsg matches FinalMsg for %w
 			wantCause:       stdErrorInstance,
 		},
 		{
 			name:            "wrap custom error",
 			format:          "prefix %w",
 			args:            []interface{}{customErrorInstance},
-			wantFinalMsg:    "prefix: custom error",
-			wantInternalMsg: "prefix",
+			wantFinalMsg:    "prefix custom error", // Matches fmt.Errorf output
+			wantInternalMsg: "prefix custom error",
 			wantCause:       customErrorInstance,
 		},
 		{
 			name:            "%w at start",
 			format:          "%w suffix",
 			args:            []interface{}{stdErrorInstance},
-			wantFinalMsg:    "suffix: std error",
-			wantInternalMsg: "suffix",
+			wantFinalMsg:    "std error suffix", // Matches fmt.Errorf output
+			wantInternalMsg: "std error suffix",
 			wantCause:       stdErrorInstance,
 		},
 		{
-			name:            "%w with flags",
-			format:          "prefix %+w suffix",
+			name:            "%w with flags (flags ignored by %w)",
+			format:          "prefix %+w suffix", // fmt.Errorf ignores flags like '+' for %w
 			args:            []interface{}{stdErrorInstance},
-			wantFinalMsg:    "prefix suffix: std error",
-			wantInternalMsg: "prefix suffix",
+			wantFinalMsg:    "prefix std error suffix", // Matches fmt.Errorf output
+			wantInternalMsg: "prefix std error suffix",
 			wantCause:       stdErrorInstance,
 		},
 		{
 			name:            "no space around %w",
 			format:          "prefix%wsuffix",
 			args:            []interface{}{stdErrorInstance},
-			wantFinalMsg:    "prefixsuffix: std error",
-			wantInternalMsg: "prefixsuffix",
+			wantFinalMsg:    "prefixstd errorsuffix", // Matches fmt.Errorf output
+			wantInternalMsg: "prefixstd errorsuffix",
 			wantCause:       stdErrorInstance,
 		},
 		{
 			name:            "format becomes empty after removing %w",
 			format:          "%w",
 			args:            []interface{}{stdErrorInstance},
-			wantFinalMsg:    "std error",
-			wantInternalMsg: "",
+			wantFinalMsg:    "std error", // Matches fmt.Errorf output
+			wantInternalMsg: "std error",
 			wantCause:       stdErrorInstance,
 		},
 
-		// Error cases.
+		// Error cases (no change needed in expectations, as these test Newf's error messages)
 		{
 			name:            "multiple %w",
 			format:          "%w %w",
@@ -1035,29 +1040,48 @@ func TestNewf(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Need to ensure pooled errors are freed if they are used in args
+			// Safest is often to recreate them inside the test run if pooling is enabled
+			// For simplicity here, assuming they are managed correctly or pooling is off
+			// If customErrorInstance is pooled, it needs defer Free() or similar management.
+
 			got := Newf(tt.format, tt.args...)
 			if got == nil {
 				t.Fatalf("Newf() returned nil, expected *Error")
 			}
+			// Consider defer got.Free() if AutoFree is false in config
 
 			if gotMsg := got.Error(); gotMsg != tt.wantFinalMsg {
 				t.Errorf("Newf().Error() = %q, want %q", gotMsg, tt.wantFinalMsg)
 			}
 
+			// --- Cause verification remains crucial ---
 			gotCause := errors.Unwrap(got)
 			if tt.wantCause != nil {
+				// Use errors.Is for robust checking, especially if causes might be wrapped themselves
 				if gotCause == nil {
 					t.Errorf("Newf() cause = nil, want %v (%T)", tt.wantCause, tt.wantCause)
-				} else if !errors.Is(got, tt.wantCause) {
-					t.Errorf("Newf() cause mismatch: got %v (%T), want %v (%T)", gotCause, gotCause, tt.wantCause, tt.wantCause)
+				} else if !errors.Is(got, tt.wantCause) { // Check the chain
+					t.Errorf("Newf() cause mismatch (using Is): got chain does not contain %v (%T)", tt.wantCause, tt.wantCause)
+				} else if gotCause != tt.wantCause {
+					// Optional: Also check direct cause equality if important
+					// t.Logf("Note: Unwrap() direct cause = %v (%T), expected %v (%T)", gotCause, gotCause, tt.wantCause, tt.wantCause)
 				}
-			} else if gotCause != nil {
-				t.Errorf("Newf() cause = %v (%T), want nil", gotCause, gotCause)
+			} else { // Expected no cause
+				if gotCause != nil {
+					t.Errorf("Newf() cause = %v (%T), want nil", gotCause, gotCause)
+				}
 			}
 
+			// If we expected a format error, the cause should definitely be nil
 			if tt.wantErrFormat && gotCause != nil {
 				t.Errorf("Newf() returned format error %q but unexpectedly set cause to %v", got.Error(), gotCause)
 			}
+
+			// Check internal message field if still relevant (might remove this check)
+			// if !tt.wantErrFormat && got.msg != tt.wantInternalMsg {
+			//  t.Errorf("Newf().msg internal field = %q, want %q", got.msg, tt.wantInternalMsg)
+			// }
 		})
 	}
 }
@@ -1096,40 +1120,58 @@ func TestNewfCompatibilityWithFmtErrorf(t *testing.T) {
 		{"no space %w next", "no space %w next", func() []interface{} { return []interface{}{errors.New("error")} }},
 		{"%w starts", "%w starts", func() []interface{} { return []interface{}{errors.New("error")} }},
 		{"format is only %w", "%w", func() []interface{} { return []interface{}{errors.New("error")} }},
-		{"%w with flags", "%+w suffix", func() []interface{} { return []interface{}{errors.New("error")} }},
+		{"%w with flags", "%+w suffix", func() []interface{} { return []interface{}{errors.New("error")} }}, // fmt.Errorf ignores flags
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			args := tt.argsFn()
-			var causeErrArg error
-			for i := len(args) - 1; i >= 0; i-- {
-				if e, ok := args[i].(error); ok {
+			var causeErrArg error // Find the error argument used for %w
+			for _, arg := range args {
+				if e, ok := arg.(error); ok {
 					causeErrArg = e
-					break
+					break // Assume the first error found is the one for %w
 				}
 			}
 			if causeErrArg == nil {
-				t.Fatal("Could not find error argument for %w in test args")
+				t.Fatalf("Test setup error: Could not find error argument for %%w in args: %v", args)
 			}
 
+			// Generate errors using both libraries
 			stdErr := fmt.Errorf(tt.format, args...)
 			customErrImpl := Newf(tt.format, args...)
+			if customErrImpl == nil {
+				t.Fatalf("Newf returned nil unexpectedly")
+			}
+			// Consider defer customErrImpl.Free() if needed
 
+			// --- Verify Cause ---
 			stdUnwrapped := errors.Unwrap(stdErr)
 			customUnwrapped := errors.Unwrap(customErrImpl)
 
 			if stdUnwrapped == nil || customUnwrapped == nil {
-				t.Fatalf("Expected both errors to be unwrappable")
-			}
-			if customUnwrapped != stdUnwrapped {
-				t.Errorf("Unwrapped instance mismatch\n custom: %p (%T)\n std:    %p (%T)", customUnwrapped, customUnwrapped, stdUnwrapped, stdUnwrapped)
-			}
-			if !errors.Is(customErrImpl, causeErrArg) {
-				t.Errorf("Custom error Is(cause) failed")
+				t.Errorf("Expected both errors to be unwrappable, stdUnwrap=%v, customUnwrap=%v", stdUnwrapped, customUnwrapped)
+			} else {
+				// Check if the unwrapped errors are the *same instance* we passed in
+				if customUnwrapped != causeErrArg {
+					t.Errorf("Custom error did not unwrap to the original cause instance.\n got: %p (%T)\n want: %p (%T)", customUnwrapped, customUnwrapped, causeErrArg, causeErrArg)
+				}
+				if stdUnwrapped != causeErrArg {
+					// This check is more about validating the test itself
+					t.Logf("Standard error did not unwrap to the original cause instance (test validation).\n got: %p (%T)\n want: %p (%T)", stdUnwrapped, stdUnwrapped, causeErrArg, causeErrArg)
+				}
+				// Verify errors.Is works correctly on the custom error
+				if !errors.Is(customErrImpl, causeErrArg) {
+					t.Errorf("errors.Is(customErrImpl, causeErrArg) failed")
+				}
 			}
 
-			compareWrappedErrorStrings(t, customErrImpl.Error(), stdErr.Error(), causeErrArg.Error())
+			// --- Verify String Output (Exact Match) ---
+			gotStr := customErrImpl.Error()
+			wantStr := stdErr.Error()
+			if gotStr != wantStr {
+				t.Errorf("String output mismatch:\n got: %q\nwant: %q", gotStr, wantStr)
+			}
 		})
 	}
 }
@@ -1138,14 +1180,16 @@ var errForEdgeCases = errors.New("error")
 
 // TestNewfEdgeCases covers additional Newf scenarios, such as nil interfaces,
 // escaped percent signs, and malformed formats.
+// Expectations for %w cases are updated for fmt.Errorf compatibility.
 func TestNewfEdgeCases(t *testing.T) {
 	tests := []struct {
 		name      string
 		format    string
 		args      []interface{}
-		wantMsg   string
+		wantMsg   string // EXPECTATION UPDATED
 		wantCause error
 	}{
+		// Cases without %w (no change)
 		{
 			name:    "nil interface arg for %v",
 			format:  "test %v",
@@ -1153,24 +1197,26 @@ func TestNewfEdgeCases(t *testing.T) {
 			wantMsg: "test <nil>",
 		},
 		{
+			name:      "malformed format ends with %",
+			format:    "test %w %", // This case causes a parse error, not a %w formatting issue
+			args:      []interface{}{errForEdgeCases},
+			wantMsg:   `errors.Newf: format "test %w %" ends with %`, // Newf's specific error message
+			wantCause: nil,
+		},
+
+		// Cases with %w (EXPECTATIONS UPDATED)
+		{
 			name:      "escaped %% with %w",
 			format:    "%%prefix %% %w %%suffix",
 			args:      []interface{}{errForEdgeCases},
-			wantMsg:   "%prefix % %suffix: error",
+			wantMsg:   "%prefix % error %suffix", // Matches fmt.Errorf output
 			wantCause: errForEdgeCases,
-		},
-		{
-			name:      "malformed format ends with %",
-			format:    "test %w %",
-			args:      []interface{}{errForEdgeCases},
-			wantMsg:   `errors.Newf: format "test %w %" ends with %`,
-			wantCause: nil,
 		},
 		{
 			name:      "multiple verbs before %w",
 			format:    "%s %d %w",
 			args:      []interface{}{"foo", 42, errForEdgeCases},
-			wantMsg:   "foo 42: error",
+			wantMsg:   "foo 42 error", // Matches fmt.Errorf output
 			wantCause: errForEdgeCases,
 		},
 	}
@@ -1186,6 +1232,7 @@ func TestNewfEdgeCases(t *testing.T) {
 				t.Errorf("Newf().Error() = %q, want %q", gotMsg, tt.wantMsg)
 			}
 
+			// Cause verification
 			gotCause := errors.Unwrap(err)
 			if tt.wantCause != nil {
 				if !errors.Is(err, tt.wantCause) {
