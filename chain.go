@@ -528,20 +528,45 @@ func (c *Chain) wrapCallable(fn interface{}, args ...interface{}) (func() error,
 
 // executeStep runs a single step, applying retries if configured.
 func (c *Chain) executeStep(ctx context.Context, step *chainStep) error {
-	// Check if the context has been canceled
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
 	if step.config.retry != nil {
-		// Apply the chain's context to the retry configuration
 		retry := step.config.retry.Transform(WithContext(ctx))
-		// Execute the step with retries
-		return retry.Execute(step.execute)
+		// Wrap step execution to respect context
+		wrappedFn := func() error {
+			type result struct {
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				done <- result{err: step.execute()}
+			}()
+			select {
+			case res := <-done:
+				return res.err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return retry.Execute(wrappedFn)
 	}
-	// Execute the step directly
-	return step.execute()
+	// Non-retry case also respects context
+	type result struct {
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		done <- result{err: step.execute()}
+	}()
+	select {
+	case res := <-done:
+		return res.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // enhanceError wraps an error with additional context from the step.
