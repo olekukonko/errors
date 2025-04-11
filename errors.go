@@ -1,3 +1,9 @@
+// Package errors provides a robust error handling library with support for
+// error wrapping, stack traces, context storage, and retry mechanisms. It extends
+// the standard library's error interface with features like HTTP-like status codes,
+// error categorization, and JSON serialization, while maintaining compatibility
+// with `errors.Is`, `errors.As`, and `errors.Unwrap`. The package is thread-safe
+// and optimized with object pooling for performance.
 package errors
 
 import (
@@ -5,39 +11,49 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 )
 
+// Constants defining default configuration and context keys.
 const (
-	ctxTimeout = "[error] timeout" // Context key for marking timeout errors
-	ctxRetry   = "[error] retry"   // Context key for marking retryable errors
+	ctxTimeout = "[error] timeout" // Context key marking timeout errors.
+	ctxRetry   = "[error] retry"   // Context key marking retryable errors.
 
-	contextSize = 4   // Default size of fixed-size context array
-	bufferSize  = 256 // Initial buffer size for JSON marshaling
-	warmUpSize  = 100 // Number of errors to pre-warm the pool
-	stackDepth  = 32  // Default maximum stack trace depth
+	contextSize = 4   // Initial size of fixed-size context array for small contexts.
+	bufferSize  = 256 // Initial buffer size for JSON marshaling.
+	warmUpSize  = 100 // Number of errors to pre-warm the pool for efficiency.
+	stackDepth  = 32  // Maximum stack trace depth to prevent excessive memory use.
+
+	DefaultCode = 500 // Default HTTP status code for errors if not specified.
 )
 
+// spaceRe is a precompiled regex for normalizing whitespace in error messages.
+var spaceRe = regexp.MustCompile(`\s+`)
+
+// ErrorCategory is a string type for categorizing errors (e.g., "network", "validation").
 type ErrorCategory string
 
 // ErrorOpts provides options for customizing error creation.
 type ErrorOpts struct {
-	SkipStack int // Number of stack frames to skip when capturing the stack trace
+	SkipStack int // Number of stack frames to skip when capturing the stack trace.
 }
 
-// Config defines the configuration for the errors package.
+// Config defines the global configuration for the errors package, controlling
+// stack depth, context size, pooling, and frame filtering.
 type Config struct {
-	StackDepth     int  // Maximum depth of the stack trace; 0 uses default
-	ContextSize    int  // Initial size of the context map; 0 uses default
-	DisablePooling bool // Disables object pooling for errors if true
-	FilterInternal bool // Filters internal package frames from stack traces if true
-	AutoFree       bool // Automatically frees errors to pool if true
+	StackDepth     int  // Maximum stack trace depth; 0 uses default (32).
+	ContextSize    int  // Initial context map size; 0 uses default (4).
+	DisablePooling bool // If true, disables object pooling for errors.
+	FilterInternal bool // If true, filters internal package frames from stack traces.
+	AutoFree       bool // If true, automatically frees errors to pool after use.
 }
 
-// cachedConfig holds the current configuration, updated only on Configure().
+// cachedConfig holds the current configuration, updated only by Configure().
+// Protected by configMu for thread-safety.
 type cachedConfig struct {
 	stackDepth     int
 	contextSize    int
@@ -47,14 +63,19 @@ type cachedConfig struct {
 }
 
 var (
+	// currentConfig stores the active configuration, read frequently and updated rarely.
 	currentConfig cachedConfig
-	configMu      sync.RWMutex
-	errorPool     = NewErrorPool() // Custom pool for Error instances
-	stackPool     = sync.Pool{     // Pool for stack trace slices
+	// configMu protects updates to currentConfig for thread-safety.
+	configMu sync.RWMutex
+	// errorPool manages reusable Error instances to reduce allocations.
+	errorPool = NewErrorPool()
+	// stackPool manages reusable stack trace slices for efficiency.
+	stackPool = sync.Pool{
 		New: func() interface{} {
 			return make([]uintptr, currentConfig.stackDepth)
 		},
 	}
+	// emptyError is a pre-allocated empty error for lightweight reuse.
 	emptyError = &Error{
 		smallContext: [contextSize]contextItem{},
 		msg:          "",
@@ -64,43 +85,42 @@ var (
 	}
 )
 
-//var bufferPool = sync.Pool{
-//	New: func() interface{} {
-//		return bytes.NewBuffer(make([]byte, 0, bufferSize))
-//	},
-//}
-
-// contextItem represents a single key-value pair in the smallContext array.
+// contextItem holds a single key-value pair in the smallContext array.
 type contextItem struct {
 	key   string
 	value interface{}
 }
 
-// Error represents a custom error with enhanced features like context, stack traces, and wrapping.
+// Error is a custom error type with enhanced features: message, name, stack trace,
+// context, cause, and metadata like code and category. It is thread-safe and
+// supports pooling for performance.
 type Error struct {
-	// Primary error information (most frequently accessed)
-	msg   string    // Error message
-	name  string    // Error name/type
-	stack []uintptr // Stack trace
+	// Primary fields (frequently accessed).
+	msg   string    // The error message displayed by Error().
+	name  string    // The error name or type (e.g., "AuthError").
+	stack []uintptr // Stack trace as program counters.
 
-	// Secondary error metadata
-	template   string // Message template used if msg is empty
-	category   string // Error category (e.g., "network", "validation")
-	count      uint64 // Occurrence count for tracking frequency
-	code       int32  // HTTP-like error code
-	smallCount int32  // Number of items in smallContext
+	// Secondary metadata.
+	template   string // Fallback message template if msg is empty.
+	category   string // Error category (e.g., "network").
+	count      uint64 // Occurrence count for tracking frequency.
+	code       int32  // HTTP-like status code (e.g., 400, 500).
+	smallCount int32  // Number of items in smallContext.
 
-	// Context and chaining
-	context      map[string]interface{}   // Additional context as key-value pairs
-	cause        error                    // Wrapped underlying error
-	callback     func()                   // Optional callback executed on Error()
-	smallContext [contextSize]contextItem // Fixed-size context storage for efficiency
+	// Context and chaining.
+	context      map[string]interface{}   // Key-value pairs for additional context.
+	cause        error                    // Wrapped underlying error for chaining.
+	callback     func()                   // Optional callback invoked by Error().
+	smallContext [contextSize]contextItem // Fixed-size array for small contexts.
 
-	// Synchronization
-	mu sync.RWMutex // Protects concurrent access to mutable fields
+	// Synchronization.
+	mu sync.RWMutex // Protects mutable fields (context, smallContext).
+
+	// Internal flags.
+	formatWrapped bool // True if created by Newf with %w verb.
 }
 
-// init initializes the package with default configuration and pre-warms the error pool.
+// init sets up the package with default configuration and pre-warms the error pool.
 func init() {
 	currentConfig = cachedConfig{
 		stackDepth:     stackDepth,
@@ -109,12 +129,15 @@ func init() {
 		filterInternal: true,
 		autoFree:       true,
 	}
-	WarmPool(warmUpSize) // Pre-warm pool with initial errors
+	WarmPool(warmUpSize) // Pre-allocate errors for performance.
 }
 
 // Configure updates the global configuration for the errors package.
-// Thread-safe; should be called before heavy usage for optimal performance.
-// Changes apply immediately to all subsequent error operations.
+// It is thread-safe and should be called early to avoid race conditions.
+// Changes apply to all subsequent error operations.
+// Example:
+//
+//	errors.Configure(errors.Config{StackDepth: 16, DisablePooling: true})
 func Configure(cfg Config) {
 	configMu.Lock()
 	defer configMu.Unlock()
@@ -130,8 +153,9 @@ func Configure(cfg Config) {
 	currentConfig.autoFree = cfg.AutoFree
 }
 
-// newError creates a new Error instance, using the pool if enabled.
-// Initializes smallContext and stack appropriately.
+// newError creates a new Error instance, reusing from the pool if enabled.
+// Initializes smallContext and sets stack to nil.
+// Internal use; prefer New, Named, or Trace for public API.
 func newError() *Error {
 	if currentConfig.disablePooling {
 		return &Error{
@@ -142,75 +166,356 @@ func newError() *Error {
 	return errorPool.Get()
 }
 
-// Empty creates a new empty error with no stack trace.
-// Useful as a base for building errors incrementally.
+// Empty returns a new empty error with no message, name, or stack trace.
+// Useful for incrementally building errors or as a neutral base.
+// Example:
+//
+//	err := errors.Empty().With("key", "value").WithCode(400)
 func Empty() *Error {
 	return emptyError
 }
 
-// Named creates a new error with a specific name and stack trace.
-// The name is used as the error message if no other message is set.
+// Named creates an error with the specified name and captures a stack trace.
+// The name doubles as the error message if no message is set.
+// Use for errors where type identification and stack context are important.
+// Example:
+//
+//	err := errors.Named("AuthError").WithCode(401)
 func Named(name string) *Error {
 	e := newError()
 	e.name = name
 	return e.WithStack()
 }
 
-// New creates a fast, lightweight error without stack tracing.
-// Use instead of Trace() when stack traces aren't needed for better performance.
+// New creates a lightweight error with the given message and no stack trace.
+// Optimized for performance; use Trace() for stack traces.
+// Returns a shared empty error for empty messages to reduce allocations.
+// Example:
+//
+//	err := errors.New("invalid input")
 func New(text string) *Error {
 	if text == "" {
-		return emptyError.Copy() // Global pre-allocated empty error
+		return emptyError.Copy() // Avoid modifying shared instance.
 	}
 	err := newError()
 	err.msg = text
 	return err
 }
 
-// Newf is an alias to Errorf for fmt.Errorf compatibility.
-// Creates a formatted error without stack traces.
+// Newf creates a formatted error, supporting the %w verb for wrapping errors.
+// If the format contains exactly one %w verb with a non-nil error argument,
+// the error is wrapped as the cause, and the message excludes the %w part.
+// The final Error() output combines the formatted message and cause.
+// Does not capture a stack trace.
+// Example:
+//
+//	cause := errors.New("db error")
+//	err := errors.Newf("query failed: %w", cause)
+//	// err.Error() == "query failed: db error"
 func Newf(format string, args ...interface{}) *Error {
 	err := newError()
-	err.msg = fmt.Sprintf(format, args...)
+
+	// Scan for %w and validate arguments.
+	var wCount int
+	var wArgPos = -1
+	var wArg error
+	var validationErrorMsg string
+	argPos := 0
+	runes := []rune(format)
+	i := 0
+	parsingOk := true
+	var fmtVerbs []struct {
+		isW    bool
+		spec   string
+		argIdx int
+	}
+
+	// Parse format string to identify verbs and literals.
+	for i < len(runes) && parsingOk {
+		segmentStart := i
+		if runes[i] == '%' {
+			if i+1 >= len(runes) {
+				parsingOk = false
+				validationErrorMsg = "ends with %"
+				break
+			}
+			if runes[i+1] == '%' {
+				fmtVerbs = append(fmtVerbs, struct {
+					isW    bool
+					spec   string
+					argIdx int
+				}{isW: false, spec: "%%", argIdx: -1})
+				i += 2
+				continue
+			}
+			i++
+			for i < len(runes) && strings.ContainsRune("+- #0", runes[i]) {
+				i++
+			}
+			for i < len(runes) && ((runes[i] >= '0' && runes[i] <= '9') || runes[i] == '.') {
+				i++
+			}
+			if i >= len(runes) {
+				parsingOk = false
+				validationErrorMsg = "ends mid-specifier"
+				break
+			}
+			verb := runes[i]
+			specifierEndIndex := i + 1
+			fullSpec := string(runes[segmentStart:specifierEndIndex])
+			currentVerbConsumesArg := strings.ContainsRune("vTtbcdoqxXUeEfFgGspw", verb)
+			currentArgIdx := -1
+			isWVerb := false
+			if verb == 'w' {
+				isWVerb = true
+				wCount++
+				if wCount == 1 {
+					wArgPos = argPos
+				} else {
+					parsingOk = false
+					validationErrorMsg = "multiple %w"
+					break
+				}
+			}
+			if currentVerbConsumesArg {
+				if argPos >= len(args) {
+					parsingOk = false
+					if wArgPos == argPos {
+						validationErrorMsg = "missing %w argument"
+					} else {
+						validationErrorMsg = fmt.Sprintf("missing argument for %s", string(verb))
+					}
+					break
+				}
+				currentArgIdx = argPos
+				if isWVerb {
+					cause, ok := args[argPos].(error)
+					if !ok || cause == nil {
+						parsingOk = false
+						validationErrorMsg = "bad %w argument type"
+						break
+					}
+					wArg = cause
+				}
+				argPos++
+			}
+			fmtVerbs = append(fmtVerbs, struct {
+				isW    bool
+				spec   string
+				argIdx int
+			}{isW: isWVerb, spec: fullSpec, argIdx: currentArgIdx})
+			i = specifierEndIndex
+		} else {
+			literalStart := i
+			for i < len(runes) && runes[i] != '%' {
+				i++
+			}
+			fmtVerbs = append(fmtVerbs, struct {
+				isW    bool
+				spec   string
+				argIdx int
+			}{isW: false, spec: string(runes[literalStart:i]), argIdx: -1})
+		}
+	}
+	if parsingOk && argPos < len(args) {
+		parsingOk = false
+		validationErrorMsg = fmt.Sprintf("too many arguments for format %q", format)
+	}
+
+	// Handle format validation errors.
+	if !parsingOk {
+		switch validationErrorMsg {
+		case "multiple %w":
+			err.msg = fmt.Sprintf("errors.Newf: format %q has multiple %%w verbs", format)
+		case "missing %w argument":
+			err.msg = fmt.Sprintf("errors.Newf: format %q has %%w but not enough arguments", format)
+		case "bad %w argument type":
+			argValStr := "(<nil>)"
+			if wArgPos >= 0 && wArgPos < len(args) && args[wArgPos] != nil {
+				argValStr = fmt.Sprintf("(%T)", args[wArgPos])
+			} else if wArgPos >= len(args) {
+				argValStr = "(missing)"
+			}
+			err.msg = fmt.Sprintf("errors.Newf: argument %d for %%w is not a non-nil error %s", wArgPos, argValStr)
+		case "ends with %":
+			err.msg = fmt.Sprintf("errors.Newf: format %q ends with %%", format)
+		case "ends mid-specifier":
+			err.msg = fmt.Sprintf("errors.Newf: format %q ends during verb specifier", format)
+		default:
+			err.msg = fmt.Sprintf("errors.Newf: error in format %q: %s", format, validationErrorMsg)
+		}
+		err.cause = nil
+		return err
+	}
+
+	// Process valid format string.
+	if wCount == 1 && wArg != nil {
+		// Handle %w: wrap the cause and format without %w.
+		err.cause = wArg
+		err.formatWrapped = true
+
+		var reducedFormat strings.Builder
+		var reducedArgs []interface{}
+
+		// Build reduced format excluding %w.
+		for _, verb := range fmtVerbs {
+			if verb.isW {
+				continue
+			}
+			reducedFormat.WriteString(verb.spec)
+			if verb.argIdx != -1 {
+				reducedArgs = append(reducedArgs, args[verb.argIdx])
+			}
+		}
+
+		rawReducedFormat := reducedFormat.String()
+
+		// Format the reduced string.
+		if rawReducedFormat != "" || len(reducedArgs) > 0 {
+			result, fmtErr := FmtErrorCheck(rawReducedFormat, reducedArgs...)
+			if fmtErr != nil {
+				err.msg = fmt.Sprintf("errors.Newf: formatting error with reduced format %q for original %q: %v", rawReducedFormat, format, fmtErr)
+				err.cause = nil
+				err.formatWrapped = false
+				return err
+			}
+			// Normalize whitespace in the message.
+			cleanedResult := spaceRe.ReplaceAllString(result, " ")
+			err.msg = strings.TrimSpace(cleanedResult)
+		} else {
+			err.msg = ""
+		}
+	} else {
+		// No %w: format directly.
+		result, fmtErr := FmtErrorCheck(format, args...)
+		if fmtErr != nil {
+			err.msg = fmt.Sprintf("errors.Newf: formatting error for format %q: %v", format, fmtErr)
+			err.cause = nil
+			err.formatWrapped = false
+		} else {
+			err.msg = result
+		}
+	}
+
 	return err
 }
 
-// Std creates a standard error using errors.New, provided for backward compatibility.
-// This function serves as a lightweight wrapper around the standard library's error creation,
-// allowing users to opt into basic error handling without adopting the full features of this package.
+// Errorf is an alias for Newf, providing a familiar interface compatible with
+// fmt.Errorf. It creates a formatted error without capturing a stack trace.
+// See Newf for full details on formatting, including %w support for error wrapping.
+//
+// Example:
+//
+//	err := errors.Errorf("failed: %w", errors.New("cause"))
+//	// err.Error() == "failed: cause"
+func Errorf(format string, args ...interface{}) *Error {
+	return Newf(format, args...)
+}
+
+// FmtErrorCheck safely formats a string using fmt.Sprintf, catching panics.
+// Returns the formatted string and any error encountered.
+// Internal use by Newf to validate format strings.
+// Example:
+//
+//	result, err := FmtErrorCheck("value: %s", "test")
+func FmtErrorCheck(format string, args ...interface{}) (result string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if e, ok := r.(error); ok {
+				err = e
+			} else {
+				err = fmt.Errorf("panic during formatting: %v", r)
+			}
+		}
+	}()
+	result = fmt.Sprintf(format, args...)
+	return result, nil
+}
+
+// countFmtArgs counts format specifiers that consume arguments in a format string.
+// Ignores %% and non-consuming verbs like %n.
+// Internal use by Newf for argument validation.
+func countFmtArgs(format string) int {
+	count := 0
+	runes := []rune(format)
+	i := 0
+	for i < len(runes) {
+		if runes[i] == '%' {
+			if i+1 < len(runes) && runes[i+1] == '%' {
+				i += 2 // Skip %%
+				continue
+			}
+			i++ // Move past %
+			for i < len(runes) && (runes[i] == '+' || runes[i] == '-' || runes[i] == '#' ||
+				runes[i] == ' ' || runes[i] == '0' ||
+				(runes[i] >= '1' && runes[i] <= '9') || runes[i] == '.') {
+				i++
+			}
+			if i < len(runes) {
+				if strings.ContainsRune("vTtbcdoqxXUeEfFgGsp", runes[i]) {
+					count++
+				}
+				i++ // Move past verb
+			}
+		} else {
+			i++
+		}
+	}
+	return count
+}
+
+// Std creates a standard error using errors.New for compatibility.
+// Does not capture stack traces or add context.
+// Example:
+//
+//	err := errors.Std("simple error")
 func Std(text string) error {
 	return errors.New(text)
 }
 
-// Stdf creates a formatted standard error using fmt.Errorf, provided for backward compatibility.
-// This function wraps the standard library's formatted error creation, offering a simple alternative
-// to the package's enhanced error handling while maintaining compatibility with existing codebases.
+// Stdf creates a formatted standard error using fmt.Errorf for compatibility.
+// Supports %w for wrapping; does not capture stack traces.
+// Example:
+//
+//	err := errors.Stdf("failed: %w", cause)
 func Stdf(format string, a ...interface{}) error {
 	return fmt.Errorf(format, a...)
 }
 
-// Trace creates an error with stack trace capture enabled.
-// Use when call stacks are needed for debugging; has performance overhead.
+// Trace creates an error with the given message and captures a stack trace.
+// Use when debugging context is needed; for performance, prefer New().
+// Example:
+//
+//	err := errors.Trace("operation failed")
 func Trace(text string) *Error {
 	e := New(text)
 	return e.WithStack()
 }
 
-// Tracef creates a formatted error with stack trace.
-// Combines Errorf and WithStack for convenience.
+// Tracef creates a formatted error with a stack trace.
+// Supports %w for wrapping errors.
+// Example:
+//
+//	err := errors.Tracef("query %s failed: %w", query, cause)
 func Tracef(format string, args ...interface{}) *Error {
 	e := Newf(format, args...)
 	return e.WithStack()
 }
 
 // As attempts to assign the error or one in its chain to the target interface.
-// It only assigns when the target is a **Error and the current error node has a non-empty name.
-// If the current node has an empty name, it delegates to its wrapped cause.
+// Supports *Error and standard error types, traversing the cause chain.
+// Returns true if successful.
+// Example:
+//
+//	var target *Error
+//	if errors.As(err, &target) {
+//	  fmt.Println(target.Name())
+//	}
 func (e *Error) As(target interface{}) bool {
 	if e == nil {
 		return false
 	}
-	// Handle *Error target (for stderrors.As compatibility)
+	// Handle *Error target.
 	if targetPtr, ok := target.(*Error); ok {
 		current := e
 		for current != nil {
@@ -228,7 +533,7 @@ func (e *Error) As(target interface{}) bool {
 		}
 		return false
 	}
-	// Handle *error target - unwrap to innermost error
+	// Handle *error target.
 	if targetErr, ok := target.(*error); ok {
 		innermost := error(e)
 		current := error(e)
@@ -243,8 +548,7 @@ func (e *Error) As(target interface{}) bool {
 		*targetErr = innermost
 		return true
 	}
-
-	// Delegate to cause for other types
+	// Delegate to cause for other types.
 	if e.cause != nil {
 		return errors.As(e.cause, target)
 	}
@@ -252,26 +556,44 @@ func (e *Error) As(target interface{}) bool {
 }
 
 // Callback sets a function to be called when Error() is invoked.
-// Useful for logging or side effects; returns the error for chaining.
+// Useful for logging or side effects on error access.
+// Example:
+//
+//	err := errors.New("test").Callback(func() { log.Println("error accessed") })
 func (e *Error) Callback(fn func()) *Error {
 	e.callback = fn
 	return e
 }
 
-// Category returns the error's category, if set.
-// Returns an empty string if no category is defined.
+// Category returns the error’s category, if set.
+// Example:
+//
+//	if err.Category() == "network" {
+//	  handleNetworkError(err)
+//	}
 func (e *Error) Category() string {
 	return e.category
 }
 
-// Code returns the error's status code, if set.
-// Returns 0 if no code is defined.
+// Code returns the error’s HTTP-like status code, if set.
+// Returns 0 if no code is set.
+// Example:
+//
+//	if err.Code() == 404 {
+//	  renderNotFound()
+//	}
 func (e *Error) Code() int {
 	return int(e.code)
 }
 
-// Context returns the error's context as a map.
-// Converts smallContext to a map if needed; returns nil if empty.
+// Context returns the error’s context as a map, merging smallContext and map-based context.
+// Thread-safe; lazily initializes the map if needed.
+// Example:
+//
+//	ctx := err.Context()
+//	if userID, ok := ctx["user_id"]; ok {
+//	  fmt.Println(userID)
+//	}
 func (e *Error) Context() map[string]interface{} {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -285,8 +607,11 @@ func (e *Error) Context() map[string]interface{} {
 	return e.context
 }
 
-// Copy creates a deep copy of the error, preserving all fields except stack.
-// The new error does not capture a new stack trace unless explicitly added.
+// Copy creates a deep copy of the error, preserving all fields except stack freshness.
+// The new error can be modified independently.
+// Example:
+//
+//	newErr := err.Copy().With("new_key", "value")
 func (e *Error) Copy() *Error {
 	if e == emptyError {
 		return &Error{
@@ -327,56 +652,63 @@ func (e *Error) Copy() *Error {
 }
 
 // Count returns the number of times the error has been incremented.
-// Useful for tracking occurrence frequency.
+// Useful for tracking error frequency.
+// Example:
+//
+//	fmt.Printf("Error occurred %d times", err.Count())
 func (e *Error) Count() uint64 {
 	return e.count
 }
 
 // Err returns the error as an error interface.
-// Provided for compatibility; simply returns the error itself.
+// Useful for type assertions or interface compatibility.
+// Example:
+//
+//	var stdErr error = err.Err()
 func (e *Error) Err() error {
 	return e
 }
 
-// Error returns the string representation of the error.
-// Prioritizes msg, then template, then name, falling back to "unknown error".
-// Executes callback if set before returning the message.
+// Error returns the string representation of the error, combining message, template,
+// name, and cause. Invokes any set callback.
+// Format: "message: cause" if both exist, else message, template, name, or cause.
+// Example:
+//
+//	err := errors.New("failed").Wrap(errors.New("cause"))
+//	// err.Error() == "failed: cause"
 func (e *Error) Error() string {
 	if e.callback != nil {
 		e.callback()
 	}
-	var msg string
-	switch {
-	case e.msg != "":
-		msg = e.msg
-	case e.template != "":
-		msg = e.template
-	case e.name != "":
-		msg = e.name
-	default:
-		msg = "unknown error"
+
+	var buf strings.Builder
+
+	if e.msg != "" {
+		buf.WriteString(e.msg)
+	} else if e.template != "" {
+		buf.WriteString(e.template)
+	} else if e.name != "" {
+		buf.WriteString(e.name)
 	}
+
 	if e.cause != nil {
-		causeMsg := e.cause.Error()
-		if msg != "" && causeMsg != "" {
-			msg = msg + ": " + causeMsg
-		} else if causeMsg != "" {
-			msg = causeMsg
+		if buf.Len() > 0 {
+			buf.WriteString(": ")
 		}
+		buf.WriteString(e.cause.Error())
 	}
-	return msg
+
+	return buf.String()
 }
 
-// Errorf creates a formatted error without stack traces.
-// Compatible with fmt.Errorf; does not capture stack trace for performance.
-func Errorf(format string, args ...interface{}) *Error {
-	err := newError()
-	err.msg = fmt.Sprintf(format, args...)
-	return err
-}
-
-// FastStack returns a lightweight stack trace without function names.
-// Filters internal frames if FilterInternal is enabled; returns nil if no stack.
+// FastStack returns a lightweight stack trace with file and line numbers only.
+// Omits function names for performance; skips internal frames if configured.
+// Returns nil if no stack trace exists.
+// Example:
+//
+//	for _, frame := range err.FastStack() {
+//	  fmt.Println(frame) // e.g., "main.go:42"
+//	}
 func (e *Error) FastStack() []string {
 	if e.stack == nil {
 		return nil
@@ -402,8 +734,11 @@ func (e *Error) FastStack() []string {
 	return frames
 }
 
-// Find searches the error chain for the first error matching pred.
-// Starts with the current error and follows Unwrap() and Cause() chains.
+// Find searches the error chain for the first error where pred returns true.
+// Returns nil if no match is found or if pred is nil.
+// Example:
+//
+//	err := err.Find(func(e error) bool { return strings.Contains(e.Error(), "timeout") })
 func (e *Error) Find(pred func(error) bool) error {
 	if e == nil || pred == nil {
 		return nil
@@ -411,51 +746,73 @@ func (e *Error) Find(pred func(error) bool) error {
 	return Find(e, pred)
 }
 
-// Format returns a formatted string representation of the error.
-// Includes message, code, context, and stack trace if present.
+// Format returns a detailed, human-readable string representation of the error,
+// including message, code, context, stack, and cause.
+// Recursive for causes that are also *Error.
+// Example:
+//
+//	fmt.Println(err.Format())
+//	// Output:
+//	// Error: failed: cause
+//	// Code: 500
+//	// Context:
+//	//   key: value
+//	// Stack:
+//	//   1. main.main main.go:42
 func (e *Error) Format() string {
 	var sb strings.Builder
 
-	// Error message
+	// Error message.
 	sb.WriteString("Error: " + e.Error() + "\n")
 
-	// Metadata
+	// Metadata.
 	if e.code != 0 {
 		sb.WriteString(fmt.Sprintf("Code: %d\n", e.code))
 	}
 
-	// Context (only show context added at this level)
+	// Context.
 	if ctx := e.contextAtThisLevel(); len(ctx) > 0 {
 		sb.WriteString("Context:\n")
 		for k, v := range ctx {
-			sb.WriteString(fmt.Sprintf("  %s: %v\n", k, v))
+			sb.WriteString(fmt.Sprintf("\t%s: %v\n", k, v))
 		}
 	}
 
-	// Stack trace
+	// Stack trace.
 	if e.stack != nil {
 		sb.WriteString("Stack:\n")
 		for i, frame := range e.Stack() {
-			sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, frame))
+			sb.WriteString(fmt.Sprintf("\t%d. %s\n", i+1, frame))
 		}
+	}
+
+	// Cause.
+	if e.cause != nil {
+		sb.WriteString("Caused by: ")
+		if causeErr, ok := e.cause.(*Error); ok {
+			sb.WriteString(causeErr.Format())
+		} else {
+			sb.WriteString("Error: " + e.cause.Error() + "\n")
+		}
+		sb.WriteString("\n")
 	}
 
 	return sb.String()
 }
 
-// contextAtThisLevel returns context specific to this error level, excluding inherited context.
-// Combines smallContext and context map into a single map; returns nil if empty.
+// contextAtThisLevel returns context specific to this error, excluding inherited context.
+// Internal use by Format to isolate context per error level.
 func (e *Error) contextAtThisLevel() map[string]interface{} {
 	if e.context == nil && e.smallCount == 0 {
 		return nil
 	}
 
 	ctx := make(map[string]interface{})
-	// Add smallContext items
+	// Add smallContext items.
 	for i := 0; i < int(e.smallCount); i++ {
 		ctx[e.smallContext[i].key] = e.smallContext[i].value
 	}
-	// Add map context items
+	// Add map context items.
 	if e.context != nil {
 		for k, v := range e.context {
 			ctx[k] = v
@@ -465,7 +822,11 @@ func (e *Error) contextAtThisLevel() map[string]interface{} {
 }
 
 // Free resets the error and returns it to the pool if pooling is enabled.
-// Does nothing beyond reset if pooling is disabled.
+// Safe to call multiple times; no-op if pooling is disabled.
+// Call after use to prevent memory leaks when autoFree is false.
+// Example:
+//
+//	defer err.Free()
 func (e *Error) Free() {
 	if currentConfig.disablePooling {
 		return
@@ -480,14 +841,24 @@ func (e *Error) Free() {
 	errorPool.Put(e)
 }
 
-// Has checks if the error contains meaningful content.
-// Returns true if msg, template, name, or cause is non-empty/nil.
+// Has checks if the error contains meaningful content (message, template, name, or cause).
+// Returns false for nil or empty errors.
+// Example:
+//
+//	if !err.Has() {
+//	  return nil
+//	}
 func (e *Error) Has() bool {
 	return e != nil && (e.msg != "" || e.template != "" || e.name != "" || e.cause != nil)
 }
 
-// HasContextKey checks if the specified key exists in the error's context.
-// Searches both smallContext and context map; thread-safe.
+// HasContextKey checks if the specified key exists in the error’s context.
+// Thread-safe; checks both smallContext and map-based context.
+// Example:
+//
+//	if err.HasContextKey("user_id") {
+//	  fmt.Println(err.Context()["user_id"])
+//	}
 func (e *Error) HasContextKey(key string) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -506,15 +877,24 @@ func (e *Error) HasContextKey(key string) bool {
 	return false
 }
 
-// Increment increases the error's count by 1 and returns the error.
-// Uses atomic operation for thread safety.
+// Increment atomically increases the error’s count by 1 and returns the error.
+// Useful for tracking repeated occurrences.
+// Example:
+//
+//	err := err.Increment()
 func (e *Error) Increment() *Error {
 	atomic.AddUint64(&e.count, 1)
 	return e
 }
 
-// Is checks if the error matches a target error by pointer equality, name, or wrapped cause.
-// Ensures compatibility with stderrors.Is by prioritizing chain traversal.
+// Is checks if the error matches the target by pointer, name, or cause chain.
+// Compatible with errors.Is; also matches by string for standard errors.
+// Returns true if the error or its cause matches the target.
+// Example:
+//
+//	if errors.Is(err, errors.New("target")) {
+//	  handleTargetError()
+//	}
 func (e *Error) Is(target error) bool {
 	if e == nil || target == nil {
 		return e == target
@@ -527,7 +907,7 @@ func (e *Error) Is(target error) bool {
 			return true
 		}
 	}
-	// Add string comparison for standard errors
+	// Match standard errors by string.
 	if stdErr, ok := target.(error); ok && e.Error() == stdErr.Error() {
 		return true
 	}
@@ -537,8 +917,13 @@ func (e *Error) Is(target error) bool {
 	return false
 }
 
-// IsEmpty checks if the error has no meaningful content (empty message, no name/template/cause).
-// Returns true for nil errors or errors with no data.
+// IsEmpty checks if the error lacks meaningful content (no message, name, template, or cause).
+// Returns true for nil or fully empty errors.
+// Example:
+//
+//	if err.IsEmpty() {
+//	  return nil
+//	}
 func (e *Error) IsEmpty() bool {
 	if e == nil {
 		return true
@@ -546,18 +931,23 @@ func (e *Error) IsEmpty() bool {
 	return e.msg == "" && e.template == "" && e.name == "" && e.cause == nil
 }
 
-// IsNull checks if an error is nil or represents a SQL NULL value.
-// Considers both the error itself and any context values; returns true if all context is null.
+// IsNull checks if the error is nil, empty, or contains only SQL NULL values in its context or cause.
+// Useful for handling database-related errors.
+// Example:
+//
+//	if err.IsNull() {
+//	  return nil
+//	}
 func (e *Error) IsNull() bool {
 	if e == nil || e == emptyError {
 		return true
 	}
-	// If no context or cause, and no content, it's not null
+	// If no context or cause, and no content, it’s not null.
 	if e.smallCount == 0 && e.context == nil && e.cause == nil {
 		return false
 	}
 
-	// Check cause first - if it’s null, the whole error is null
+	// Check cause first.
 	if e.cause != nil {
 		var isNull bool
 		if ce, ok := e.cause.(*Error); ok {
@@ -568,10 +958,9 @@ func (e *Error) IsNull() bool {
 		if isNull {
 			return true
 		}
-		// If cause isn’t null, continue checking this error’s context
 	}
 
-	// Check small context
+	// Check small context.
 	if e.smallCount > 0 {
 		allNull := true
 		for i := 0; i < int(e.smallCount); i++ {
@@ -586,7 +975,7 @@ func (e *Error) IsNull() bool {
 		}
 	}
 
-	// Check regular context
+	// Check regular context.
 	if e.context != nil {
 		allNull := true
 		for _, v := range e.context {
@@ -601,10 +990,11 @@ func (e *Error) IsNull() bool {
 		}
 	}
 
-	// Null if we have context and it’s all null
+	// Null if context exists and is all null.
 	return e.smallCount > 0 || e.context != nil
 }
 
+// jsonBufferPool manages reusable buffers for JSON marshaling to reduce allocations.
 var (
 	jsonBufferPool = sync.Pool{
 		New: func() interface{} {
@@ -613,19 +1003,23 @@ var (
 	}
 )
 
-// MarshalJSON serializes the error to JSON, including name, message, context, cause, and stack.
-// Handles nested *Error causes and custom marshalers efficiently.
+// MarshalJSON serializes the error to JSON, including name, message, context, cause, stack, and code.
+// Causes are recursively serialized if they implement json.Marshaler or are *Error.
+// Example:
+//
+//	data, _ := json.Marshal(err)
+//	fmt.Println(string(data))
 func (e *Error) MarshalJSON() ([]byte, error) {
-	// Get buffer from pool
+	// Get buffer from pool.
 	buf := jsonBufferPool.Get().(*bytes.Buffer)
 	defer jsonBufferPool.Put(buf)
 	buf.Reset()
 
-	// Create new encoder each time (no Reset available)
+	// Create new encoder.
 	enc := json.NewEncoder(buf)
 	enc.SetEscapeHTML(false)
 
-	// Prepare error data
+	// Prepare JSON structure.
 	je := struct {
 		Name    string                 `json:"name,omitempty"`
 		Message string                 `json:"message,omitempty"`
@@ -639,17 +1033,17 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 		Code:    e.Code(),
 	}
 
-	// Handle context
+	// Add context.
 	if ctx := e.Context(); len(ctx) > 0 {
 		je.Context = ctx
 	}
 
-	// Handle stack
+	// Add stack.
 	if e.stack != nil {
 		je.Stack = e.Stack()
 	}
 
-	// Handle cause
+	// Add cause.
 	if e.cause != nil {
 		switch c := e.cause.(type) {
 		case *Error:
@@ -661,12 +1055,12 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 		}
 	}
 
-	// Encode
+	// Encode JSON.
 	if err := enc.Encode(je); err != nil {
 		return nil, err
 	}
 
-	// Return bytes without trailing newline
+	// Remove trailing newline.
 	result := buf.Bytes()
 	if len(result) > 0 && result[len(result)-1] == '\n' {
 		result = result[:len(result)-1]
@@ -674,21 +1068,31 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 	return result, nil
 }
 
-// Msgf sets the error message using a formatted string.
-// Overwrites any existing message; returns the error for chaining.
+// Msgf sets the error’s message using a formatted string and returns the error.
+// Overwrites any existing message.
+// Example:
+//
+//	err := err.Msgf("user %s not found", username)
 func (e *Error) Msgf(format string, args ...interface{}) *Error {
 	e.msg = fmt.Sprintf(format, args...)
 	return e
 }
 
-// Name returns the error's name, if set.
-// Returns an empty string if no name is defined.
+// Name returns the error’s name, if set.
+// Example:
+//
+//	if err.Name() == "AuthError" {
+//	  handleAuthError()
+//	}
 func (e *Error) Name() string {
 	return e.name
 }
 
-// Reset clears all fields of the error, preparing it for reuse.
-// Does not free the stack; use Free() to return to pool.
+// Reset clears all fields of the error, preparing it for reuse in the pool.
+// Internal use by Free; does not release stack to stackPool.
+// Example:
+//
+//	err.Reset() // Clear all fields.
 func (e *Error) Reset() {
 	e.msg = ""
 	e.name = ""
@@ -698,6 +1102,7 @@ func (e *Error) Reset() {
 	e.count = 0
 	e.cause = nil
 	e.callback = nil
+	e.formatWrapped = false
 
 	if e.context != nil {
 		for k := range e.context {
@@ -711,8 +1116,13 @@ func (e *Error) Reset() {
 	}
 }
 
-// Stack returns a detailed stack trace as a slice of strings.
-// Filters internal frames if FilterInternal is enabled; returns nil if no stack.
+// Stack returns a detailed stack trace with function names, files, and line numbers.
+// Filters internal frames if configured; returns nil if no stack exists.
+// Example:
+//
+//	for _, frame := range err.Stack() {
+//	  fmt.Println(frame) // e.g., "main.main main.go:42"
+//	}
 func (e *Error) Stack() []string {
 	if e.stack == nil {
 		return nil
@@ -742,8 +1152,11 @@ func (e *Error) Stack() []string {
 	return trace
 }
 
-// Trace ensures the error has a stack trace, capturing it if missing.
-// Skips capture if stack already exists; returns the error for chaining.
+// Trace ensures the error has a stack trace, capturing it if absent.
+// Returns the error for chaining.
+// Example:
+//
+//	err := errors.New("failed").Trace()
 func (e *Error) Trace() *Error {
 	if e.stack == nil {
 		e.stack = captureStack(2)
@@ -751,8 +1164,11 @@ func (e *Error) Trace() *Error {
 	return e
 }
 
-// Transform applies transformations to a copy of the error.
-// Returns the transformed copy or the original if no changes are needed.
+// Transform applies transformations to a copy of the error and returns the new error.
+// The original error is unchanged; nil-safe.
+// Example:
+//
+//	newErr := err.Transform(func(e *Error) { e.With("key", "value") })
 func (e *Error) Transform(fn func(*Error)) *Error {
 	if e == nil || fn == nil {
 		return e
@@ -763,13 +1179,22 @@ func (e *Error) Transform(fn func(*Error)) *Error {
 }
 
 // Unwrap returns the underlying cause of the error, if any.
-// Implements the errors.Unwrap interface for unwrapping chains.
+// Compatible with errors.Unwrap for chain traversal.
+// Example:
+//
+//	cause := errors.Unwrap(err)
 func (e *Error) Unwrap() error {
 	return e.cause
 }
 
 // UnwrapAll returns a slice of all errors in the chain, starting with this error.
-// Traverses the cause chain, creating isolated copies of each *Error.
+// Each error is isolated to prevent modifications affecting others.
+// Example:
+//
+//	chain := err.UnwrapAll()
+//	for _, e := range chain {
+//	  fmt.Println(e.Error())
+//	}
 func (e *Error) UnwrapAll() []error {
 	if e == nil {
 		return nil
@@ -813,7 +1238,10 @@ func (e *Error) UnwrapAll() []error {
 }
 
 // Walk traverses the error chain, applying fn to each error.
-// Starts with the current error and follows the cause chain.
+// Stops if fn is nil or the chain ends.
+// Example:
+//
+//	err.Walk(func(e error) { fmt.Println(e.Error()) })
 func (e *Error) Walk(fn func(error)) {
 	if e == nil || fn == nil {
 		return
@@ -829,13 +1257,16 @@ func (e *Error) Walk(fn func(error)) {
 	}
 }
 
-// With adds a key-value pair to the error's context.
-// Uses smallContext for efficiency until full, then switches to map; thread-safe.
+// With adds a key-value pair to the error’s context and returns the error.
+// Uses a fixed-size array (smallContext) for up to contextSize items, then switches
+// to a map. Thread-safe.
+// Example:
+//
+//	err := err.With("user_id", "12345")
 func (e *Error) With(key string, value interface{}) *Error {
-	// Fast path for small context (no map needed)
+	// Fast path for small context.
 	if e.smallCount < contextSize && e.context == nil {
 		e.mu.Lock()
-		// Double-check after acquiring lock
 		if e.smallCount < contextSize && e.context == nil {
 			e.smallContext[e.smallCount] = contextItem{key, value}
 			e.smallCount++
@@ -845,13 +1276,12 @@ func (e *Error) With(key string, value interface{}) *Error {
 		e.mu.Unlock()
 	}
 
-	// Slow path - requires map
+	// Slow path with map.
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if e.context == nil {
 		e.context = make(map[string]interface{}, currentConfig.contextSize)
-		// Migrate existing items if any
 		for i := int32(0); i < e.smallCount; i++ {
 			e.context[e.smallContext[i].key] = e.smallContext[i].value
 		}
@@ -861,57 +1291,76 @@ func (e *Error) With(key string, value interface{}) *Error {
 	return e
 }
 
-// WithCategory sets a category for the error and returns the error.
-// Useful for classifying errors (e.g., "network", "validation").
+// WithCategory sets the error’s category and returns the error.
+// Example:
+//
+//	err := err.WithCategory("validation")
 func (e *Error) WithCategory(category ErrorCategory) *Error {
 	e.category = string(category)
 	return e
 }
 
-// WithCode sets an HTTP-like status code for the error and returns the error.
-// Overwrites any existing code.
+// WithCode sets an HTTP-like status code and returns the error.
+// Example:
+//
+//	err := err.WithCode(400)
 func (e *Error) WithCode(code int) *Error {
 	e.code = int32(code)
 	return e
 }
 
-// WithName sets the error's name and returns the error.
-// Overwrites any existing name.
+// WithName sets the error’s name and returns the error.
+// Example:
+//
+//	err := err.WithName("AuthError")
 func (e *Error) WithName(name string) *Error {
 	e.name = name
 	return e
 }
 
-// WithRetryable marks the error as retryable in its context.
-// Adds a "retry" key with value true; returns the error.
+// WithRetryable marks the error as retryable in its context and returns the error.
+// Example:
+//
+//	err := err.WithRetryable()
 func (e *Error) WithRetryable() *Error {
 	return e.With(ctxRetry, true)
 }
 
-// WithStack captures the stack trace at call time and returns the error.
-// Skips capturing if stack already exists or depth is 0.
+// WithStack captures a stack trace if none exists and returns the error.
+// Skips one frame (caller of WithStack).
+// Example:
+//
+//	err := errors.New("failed").WithStack()
 func (e *Error) WithStack() *Error {
 	if e.stack == nil {
-		e.stack = captureStack(1) // Skip WithStack
+		e.stack = captureStack(1)
 	}
 	return e
 }
 
-// WithTemplate sets a template string for the error and returns the error.
-// Used as the error message if no explicit message is set.
+// WithTemplate sets a message template and returns the error.
+// Used as a fallback if the message is empty.
+// Example:
+//
+//	err := err.WithTemplate("operation failed")
 func (e *Error) WithTemplate(template string) *Error {
 	e.template = template
 	return e
 }
 
-// WithTimeout marks the error as a timeout error in its context.
-// Adds a "timeout" key with value true; returns the error.
+// WithTimeout marks the error as a timeout error in its context and returns the error.
+// Example:
+//
+//	err := err.WithTimeout()
 func (e *Error) WithTimeout() *Error {
 	return e.With(ctxTimeout, true)
 }
 
-// Wrap associates a cause error with this error, creating an error chain.
-// Returns the error for method chaining.
+// Wrap associates a cause error with this error, creating a chain.
+// Returns the error unchanged if cause is nil.
+// Example:
+//
+//	err := errors.New("failed").Wrap(errors.New("cause"))
 func (e *Error) Wrap(cause error) *Error {
 	if cause == nil {
 		return e
@@ -920,8 +1369,10 @@ func (e *Error) Wrap(cause error) *Error {
 	return e
 }
 
-// WrapNotNil wraps a cause error only if it is non-nil.
-// Returns the error for method chaining; no-op if cause is nil.
+// WrapNotNil wraps a cause error only if it is non-nil and returns the error.
+// Example:
+//
+//	err := err.WrapNotNil(maybeError)
 func (e *Error) WrapNotNil(cause error) *Error {
 	if cause != nil {
 		e.cause = cause
@@ -929,8 +1380,12 @@ func (e *Error) WrapNotNil(cause error) *Error {
 	return e
 }
 
-// WarmPool pre-populates the error pool with a specified number of instances.
-// Reduces allocation overhead during initial usage; no effect if pooling is disabled.
+// WarmPool pre-populates the error pool with count instances.
+// Improves performance by reducing initial allocations.
+// No-op if pooling is disabled.
+// Example:
+//
+//	errors.WarmPool(1000)
 func WarmPool(count int) {
 	if currentConfig.disablePooling {
 		return
@@ -945,8 +1400,12 @@ func WarmPool(count int) {
 	}
 }
 
-// WarmStackPool pre-populates the stack pool with a specified number of slices.
-// Reduces allocation overhead for stack traces; no effect if pooling is disabled.
+// WarmStackPool pre-populates the stack pool with count slices.
+// Improves performance for stack-intensive operations.
+// No-op if pooling is disabled.
+// Example:
+//
+//	errors.WarmStackPool(500)
 func WarmStackPool(count int) {
 	if currentConfig.disablePooling {
 		return

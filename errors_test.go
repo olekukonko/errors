@@ -1,3 +1,8 @@
+// Package errors provides a robust error handling library with support for
+// error wrapping, stack traces, context storage, and retry mechanisms.
+// This test file verifies the correctness of the error type and its methods,
+// ensuring proper behavior for creation, wrapping, inspection, and serialization.
+// Tests cover edge cases, standard library compatibility, and thread-safety.
 package errors
 
 import (
@@ -5,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -12,7 +18,7 @@ import (
 	"time"
 )
 
-// Custom error type to create a chain of errors
+// customError is a test-specific error type for verifying error wrapping and traversal.
 type customError struct {
 	msg   string
 	cause error
@@ -26,7 +32,8 @@ func (e *customError) Cause() error {
 	return e.cause
 }
 
-// TestErrorNew verifies that New creates an error with the correct message and no stack trace.
+// TestErrorNew verifies that New creates an error with the specified message
+// and does not capture a stack trace, ensuring lightweight error creation.
 func TestErrorNew(t *testing.T) {
 	err := New("test error")
 	defer err.Free()
@@ -38,7 +45,8 @@ func TestErrorNew(t *testing.T) {
 	}
 }
 
-// TestErrorNewf checks that Newf formats the message correctly and includes no stack trace.
+// TestErrorNewf checks that Newf formats the error message correctly using
+// the provided format string and arguments, without capturing a stack trace.
 func TestErrorNewf(t *testing.T) {
 	err := Newf("test %s %d", "error", 42)
 	defer err.Free()
@@ -51,7 +59,8 @@ func TestErrorNewf(t *testing.T) {
 	}
 }
 
-// TestErrorNamed ensures Named sets the name correctly and captures a stack trace.
+// TestErrorNamed ensures that Named creates a named error with the given name
+// and captures a stack trace for debugging purposes.
 func TestErrorNamed(t *testing.T) {
 	err := Named("test_name")
 	defer err.Free()
@@ -63,16 +72,19 @@ func TestErrorNamed(t *testing.T) {
 	}
 }
 
-// TestErrorMethods tests various methods on the Error type.
+// TestErrorMethods tests the core methods of the Error type, including context
+// addition, wrapping, message formatting, stack tracing, and metadata handling.
 func TestErrorMethods(t *testing.T) {
 	err := New("base error")
 	defer err.Free()
 
+	// Test With for adding key-value context.
 	err = err.With("key", "value")
 	if err.Context()["key"] != "value" {
 		t.Errorf("With() failed, context[key] = %v, want %v", err.Context()["key"], "value")
 	}
 
+	// Test Wrap for setting a cause.
 	cause := New("cause error")
 	defer cause.Free()
 	err = err.Wrap(cause)
@@ -80,37 +92,45 @@ func TestErrorMethods(t *testing.T) {
 		t.Errorf("Wrap() failed, unwrapped = %v, want %v", err.Unwrap(), cause)
 	}
 
+	// Test Msgf for updating the error message.
 	err = err.Msgf("new message %d", 123)
 	if err.Error() != "new message 123: cause error" {
 		t.Errorf("Msgf() failed, error = %v, want %v", err.Error(), "new message 123: cause error")
 	}
 
+	// Test stack absence initially.
 	stackLen := len(err.Stack())
 	if stackLen != 0 {
 		t.Errorf("Initial stack length should be 0, got %d", stackLen)
 	}
+
+	// Test Trace for capturing a stack trace.
 	err = err.Trace()
 	if len(err.Stack()) == 0 {
 		t.Errorf("Trace() should capture a stack trace, got no frames")
 	}
 
+	// Test WithCode for setting an HTTP status code.
 	err = err.WithCode(400)
 	if err.Code() != 400 {
 		t.Errorf("WithCode() failed, code = %d, want 400", err.Code())
 	}
 
+	// Test WithCategory for setting a category.
 	err = err.WithCategory("test_category")
 	if Category(err) != "test_category" {
 		t.Errorf("WithCategory() failed, category = %v, want %v", Category(err), "test_category")
 	}
 
+	// Test Increment for counting occurrences.
 	err = err.Increment()
 	if err.Count() != 1 {
 		t.Errorf("Increment() failed, count = %d, want 1", err.Count())
 	}
 }
 
-// TestErrorIs verifies the Is method for matching errors by name and wrapping.
+// TestErrorIs verifies that Is correctly identifies errors by name or through
+// wrapping, including compatibility with standard library errors.
 func TestErrorIs(t *testing.T) {
 	err := Named("test_error")
 	defer err.Free()
@@ -119,32 +139,35 @@ func TestErrorIs(t *testing.T) {
 	err3 := Named("other_error")
 	defer err3.Free()
 
+	// Test matching same-named errors.
 	if !err.Is(err2) {
 		t.Errorf("Is() failed, %v should match %v", err, err2)
 	}
+	// Test non-matching names.
 	if err.Is(err3) {
 		t.Errorf("Is() failed, %v should not match %v", err, err3)
 	}
 
+	// Test wrapped error matching.
 	wrappedErr := Named("wrapper")
 	defer wrappedErr.Free()
 	cause := Named("cause_error")
 	defer cause.Free()
 	wrappedErr = wrappedErr.Wrap(cause)
-	t.Logf("Before Is(cause): wrappedErr.cause = %p, cause = %p", wrappedErr.cause, cause)
 	if !wrappedErr.Is(cause) {
 		t.Errorf("Is() failed, wrapped error should match cause; wrappedErr = %+v, cause = %+v", wrappedErr, cause)
 	}
 
+	// Test wrapping standard library error.
 	stdErr := errors.New("std error")
 	wrappedErr = wrappedErr.Wrap(stdErr)
-	t.Logf("Before Is(stdErr): wrappedErr.cause = %p, stdErr = %p", wrappedErr.cause, stdErr)
 	if !wrappedErr.Is(stdErr) {
 		t.Errorf("Is() failed, should match stdlib error")
 	}
 }
 
-// TestErrorAs checks the As method for unwrapping to the correct error type.
+// TestErrorAs checks that As unwraps to the correct error type, supporting
+// both custom *Error and standard library errors.
 func TestErrorAs(t *testing.T) {
 	err := New("base").Wrap(Named("target"))
 	defer err.Free()
@@ -168,7 +191,7 @@ func TestErrorAs(t *testing.T) {
 	}
 }
 
-// TestErrorCount verifies the Count method for per-instance counting.
+// TestErrorCount verifies that Count tracks per-instance error occurrences.
 func TestErrorCount(t *testing.T) {
 	err := New("unnamed")
 	defer err.Free()
@@ -182,7 +205,7 @@ func TestErrorCount(t *testing.T) {
 	}
 }
 
-// TestErrorCode checks the Code method for setting and retrieving HTTP status codes.
+// TestErrorCode ensures that Code correctly sets and retrieves HTTP status codes.
 func TestErrorCode(t *testing.T) {
 	err := New("unnamed")
 	defer err.Free()
@@ -196,8 +219,10 @@ func TestErrorCode(t *testing.T) {
 	}
 }
 
-// TestErrorMarshalJSON ensures JSON serialization includes all expected fields.
+// TestErrorMarshalJSON verifies that JSON serialization includes all expected
+// fields: message, context, cause, code, and stack (when present).
 func TestErrorMarshalJSON(t *testing.T) {
+	// Test basic error with context, code, and cause.
 	err := New("test").
 		With("key", "value").
 		WithCode(400).
@@ -232,6 +257,7 @@ func TestErrorMarshalJSON(t *testing.T) {
 		t.Errorf("MarshalJSON() code = %v, want %v", got["code"], 400)
 	}
 
+	// Test error with stack trace.
 	t.Run("WithStack", func(t *testing.T) {
 		err := New("test").WithStack().WithCode(500)
 		defer err.Free()
@@ -252,8 +278,10 @@ func TestErrorMarshalJSON(t *testing.T) {
 	})
 }
 
-// TestErrorEdgeCases verifies behavior in unusual scenarios.
+// TestErrorEdgeCases verifies behavior for unusual inputs, such as nil errors,
+// empty names, and standard library error wrapping.
 func TestErrorEdgeCases(t *testing.T) {
+	// Test nil error handling.
 	var nilErr *Error
 	if nilErr.Is(nil) {
 		t.Errorf("nil.Is(nil) should be false, got true")
@@ -262,12 +290,14 @@ func TestErrorEdgeCases(t *testing.T) {
 		t.Errorf("Is(nil, non-nil) should be false")
 	}
 
+	// Test empty name mismatch.
 	err := New("empty name")
 	defer err.Free()
 	if err.Is(Named("")) {
 		t.Errorf("Error with empty name should not match unnamed error")
 	}
 
+	// Test wrapping standard library error.
 	stdErr := errors.New("std error")
 	customErr := New("custom").Wrap(stdErr)
 	defer customErr.Free()
@@ -275,14 +305,29 @@ func TestErrorEdgeCases(t *testing.T) {
 		t.Errorf("Is() should match stdlib error through wrapping")
 	}
 
+	// Test As with nil error.
 	var nilTarget *Error
 	if As(nilErr, &nilTarget) {
 		t.Errorf("As(nil, &nilTarget) should return false")
 	}
+
+	// Additional edge case: Wrapping nil error.
+	t.Run("WrapNil", func(t *testing.T) {
+		err := New("wrapper").Wrap(nil)
+		defer err.Free()
+		if err.Unwrap() != nil {
+			t.Errorf("Wrap(nil) should set cause to nil, got %v", err.Unwrap())
+		}
+		if err.Error() != "wrapper" {
+			t.Errorf("Wrap(nil) should preserve message, got %v, want %v", err.Error(), "wrapper")
+		}
+	})
 }
 
-// TestErrorRetryWithCallback tests retry functionality with a callback.
+// TestErrorRetryWithCallback verifies the retry mechanism, ensuring the callback
+// is invoked correctly and retries exhaust as expected for retryable errors.
 func TestErrorRetryWithCallback(t *testing.T) {
+	// Test retry with multiple attempts.
 	attempts := 0
 	retry := NewRetry(
 		WithMaxAttempts(3),
@@ -302,22 +347,45 @@ func TestErrorRetryWithCallback(t *testing.T) {
 	if err == nil {
 		t.Error("Expected retry to exhaust with error, got nil")
 	}
+
+	// Test zero max attempts, expecting one initial attempt (not a retry).
+	t.Run("ZeroAttempts", func(t *testing.T) {
+		attempts := 0
+		retry := NewRetry(
+			WithMaxAttempts(0),
+			WithOnRetry(func(attempt int, err error) {
+				attempts++
+			}),
+		)
+		err := retry.Execute(func() error {
+			return New("retry me").WithRetryable()
+		})
+		// Expect one attempt, as Execute runs the function once before checking retries.
+		if attempts != 1 {
+			t.Errorf("Expected 1 attempt (initial execution), got %d", attempts)
+		}
+		if err == nil {
+			t.Error("Expected error, got nil")
+		}
+	})
 }
 
-// TestErrorStackPresence verifies stack presence for New and Trace.
+// TestErrorStackPresence confirms stack trace behavior for New and Trace methods.
 func TestErrorStackPresence(t *testing.T) {
+	// New should not capture stack.
 	err := New("test")
 	if len(err.Stack()) != 0 {
 		t.Error("New() should not capture stack")
 	}
 
+	// Trace should capture stack.
 	traced := Trace("test")
 	if len(traced.Stack()) == 0 {
 		t.Error("Trace() should capture stack")
 	}
 }
 
-// TestErrorStackDepth verifies stack depth doesn’t exceed the configured maximum.
+// TestErrorStackDepth ensures that stack traces respect the configured maximum depth.
 func TestErrorStackDepth(t *testing.T) {
 	err := Trace("test")
 	frames := err.Stack()
@@ -326,8 +394,9 @@ func TestErrorStackDepth(t *testing.T) {
 	}
 }
 
-// TestErrorTransform verifies Transform behavior with nil, non-*Error, and *Error inputs.
+// TestErrorTransform verifies Transform behavior for nil, non-*Error, and *Error inputs.
 func TestErrorTransform(t *testing.T) {
+	// Test nil input.
 	t.Run("NilError", func(t *testing.T) {
 		result := Transform(nil, func(e *Error) {})
 		if result != nil {
@@ -335,6 +404,7 @@ func TestErrorTransform(t *testing.T) {
 		}
 	})
 
+	// Test standard library error.
 	t.Run("NonErrorType", func(t *testing.T) {
 		stdErr := errors.New("standard")
 		transformed := Transform(stdErr, func(e *Error) {})
@@ -349,6 +419,7 @@ func TestErrorTransform(t *testing.T) {
 		}
 	})
 
+	// Test transforming *Error.
 	t.Run("TransformError", func(t *testing.T) {
 		orig := New("original")
 		defer orig.Free()
@@ -369,7 +440,7 @@ func TestErrorTransform(t *testing.T) {
 	})
 }
 
-// TestErrorWalk verifies Walk traverses the error chain correctly.
+// TestErrorWalk ensures Walk traverses the error chain correctly, visiting all errors.
 func TestErrorWalk(t *testing.T) {
 	err1 := &customError{msg: "first error", cause: nil}
 	err2 := &customError{msg: "second error", cause: err1}
@@ -386,30 +457,30 @@ func TestErrorWalk(t *testing.T) {
 	}
 }
 
-// TestErrorFind verifies Find locates the correct error in the chain.
+// TestErrorFind verifies Find locates the first error matching the predicate.
 func TestErrorFind(t *testing.T) {
 	err1 := &customError{msg: "first error", cause: nil}
 	err2 := &customError{msg: "second error", cause: err1}
 	err3 := &customError{msg: "third error", cause: err2}
 
+	// Find existing error.
 	found := Find(err3, func(e error) bool {
 		return e.Error() == "second error"
 	})
-
 	if found == nil || found.Error() != "second error" {
 		t.Errorf("Find() = %v; want 'second error'", found)
 	}
 
+	// Find non-existent error.
 	found = Find(err3, func(e error) bool {
 		return e.Error() == "non-existent error"
 	})
-
 	if found != nil {
 		t.Errorf("Find() = %v; want nil", found)
 	}
 }
 
-// TestErrorTraceStackContent verifies Trace captures stack content correctly.
+// TestErrorTraceStackContent checks that Trace captures meaningful stack frames.
 func TestErrorTraceStackContent(t *testing.T) {
 	err := Trace("test")
 	defer err.Free()
@@ -429,7 +500,7 @@ func TestErrorTraceStackContent(t *testing.T) {
 	}
 }
 
-// TestErrorWithStackContent verifies WithStack captures stack content correctly.
+// TestErrorWithStackContent ensures WithStack captures meaningful stack frames.
 func TestErrorWithStackContent(t *testing.T) {
 	err := New("test").WithStack()
 	defer err.Free()
@@ -449,7 +520,8 @@ func TestErrorWithStackContent(t *testing.T) {
 	}
 }
 
-// TestErrorWrappingChain verifies a full error chain with wrapping.
+// TestErrorWrappingChain verifies a complex error chain with multiple layers,
+// ensuring correct message propagation, context isolation, and stack behavior.
 func TestErrorWrappingChain(t *testing.T) {
 	databaseErr := New("connection timeout").
 		With("timeout_sec", 5).
@@ -468,11 +540,13 @@ func TestErrorWrappingChain(t *testing.T) {
 		Wrap(businessErr)
 	defer apiErr.Free()
 
+	// Verify full error message.
 	expectedFullMessage := "API request failed: failed to process user 12345: connection timeout"
 	if apiErr.Error() != expectedFullMessage {
 		t.Errorf("Full error message mismatch\ngot: %q\nwant: %q", apiErr.Error(), expectedFullMessage)
 	}
 
+	// Verify error chain.
 	chain := UnwrapAll(apiErr)
 	if len(chain) != 3 {
 		t.Fatalf("Expected chain length 3, got %d", len(chain))
@@ -492,14 +566,17 @@ func TestErrorWrappingChain(t *testing.T) {
 		}
 	}
 
+	// Verify Is checks.
 	if !errors.Is(apiErr, databaseErr) {
 		t.Error("Is() should match the database error in the chain")
 	}
 
+	// Verify context isolation.
 	if ctx := businessErr.Context(); ctx["timeout_sec"] != nil {
 		t.Error("Business error should not have database context")
 	}
 
+	// Verify stack presence.
 	if stack := apiErr.Stack(); len(stack) == 0 {
 		t.Error("API error should have stack trace")
 	}
@@ -507,6 +584,7 @@ func TestErrorWrappingChain(t *testing.T) {
 		t.Error("Business error should not have stack trace")
 	}
 
+	// Verify code propagation.
 	if apiErr.Code() != 500 {
 		t.Error("API error should have code 500")
 	}
@@ -515,7 +593,8 @@ func TestErrorWrappingChain(t *testing.T) {
 	}
 }
 
-// TestErrorExampleOutput verifies the formatted output matches expectations.
+// TestErrorExampleOutput verifies that formatted output includes all relevant
+// details, such as message, context, code, and stack, for a realistic error chain.
 func TestErrorExampleOutput(t *testing.T) {
 	databaseErr := New("connection timeout").
 		With("timeout_sec", 5).
@@ -567,7 +646,8 @@ func TestErrorExampleOutput(t *testing.T) {
 	}
 }
 
-// TestErrorFullChain verifies a complex error chain with mixed error types.
+// TestErrorFullChain tests a complex chain with mixed error types (custom and standard),
+// verifying wrapping, unwrapping, and compatibility with standard library functions.
 func TestErrorFullChain(t *testing.T) {
 	stdErr := errors.New("file not found")
 	authErr := Named("AuthError").WithCode(401)
@@ -616,7 +696,7 @@ func TestErrorFullChain(t *testing.T) {
 	}
 }
 
-// TestErrorUnwrapAllMessageIsolation verifies message isolation in UnwrapAll.
+// TestErrorUnwrapAllMessageIsolation ensures UnwrapAll preserves individual error messages.
 func TestErrorUnwrapAllMessageIsolation(t *testing.T) {
 	inner := New("inner")
 	middle := New("middle").Wrap(inner)
@@ -634,7 +714,8 @@ func TestErrorUnwrapAllMessageIsolation(t *testing.T) {
 	}
 }
 
-// TestErrorIsEmpty verifies IsEmpty behavior for various error states.
+// TestErrorIsEmpty verifies IsEmpty behavior for various error states, including
+// nil, empty messages, and errors with causes or templates.
 func TestErrorIsEmpty(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -663,7 +744,8 @@ func TestErrorIsEmpty(t *testing.T) {
 	}
 }
 
-// TestErrorIsNull verifies IsNull behavior for null and non-null errors.
+// TestErrorIsNull verifies IsNull behavior for null and non-null errors, including
+// SQL null values in context or causes.
 func TestErrorIsNull(t *testing.T) {
 	nullString := sql.NullString{Valid: false}
 	validString := sql.NullString{String: "test", Valid: true}
@@ -693,8 +775,10 @@ func TestErrorIsNull(t *testing.T) {
 	}
 }
 
-// TestErrorFromContext verifies FromContext enhances errors with context info.
+// TestErrorFromContext ensures FromContext enhances errors with context information,
+// such as deadlines and cancellations.
 func TestErrorFromContext(t *testing.T) {
+	// Test nil error.
 	t.Run("nil error returns nil", func(t *testing.T) {
 		ctx := context.Background()
 		if FromContext(ctx, nil) != nil {
@@ -702,6 +786,7 @@ func TestErrorFromContext(t *testing.T) {
 		}
 	})
 
+	// Test deadline exceeded.
 	t.Run("deadline exceeded", func(t *testing.T) {
 		deadline := time.Now().Add(-1 * time.Hour)
 		ctx, cancel := context.WithDeadline(context.Background(), deadline)
@@ -718,6 +803,7 @@ func TestErrorFromContext(t *testing.T) {
 		}
 	})
 
+	// Test cancelled context.
 	t.Run("cancelled context", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -731,8 +817,10 @@ func TestErrorFromContext(t *testing.T) {
 	})
 }
 
-// TestContextStorage checks `smallContext`and it's expansion
+// TestContextStorage verifies the smallContext optimization and its expansion
+// to a full map, including thread-safety under concurrent access.
 func TestContextStorage(t *testing.T) {
+	// Test smallContext for first 4 items.
 	t.Run("stores first 4 items in smallContext", func(t *testing.T) {
 		err := New("test")
 
@@ -749,6 +837,7 @@ func TestContextStorage(t *testing.T) {
 		}
 	})
 
+	// Test expansion to map on 5th item.
 	t.Run("switches to map on 5th item", func(t *testing.T) {
 		err := New("test")
 
@@ -766,6 +855,7 @@ func TestContextStorage(t *testing.T) {
 		}
 	})
 
+	// Test preservation of all context items.
 	t.Run("preserves all context items", func(t *testing.T) {
 		err := New("test")
 		items := []struct {
@@ -791,6 +881,7 @@ func TestContextStorage(t *testing.T) {
 		}
 	})
 
+	// Test concurrent access safety.
 	t.Run("concurrent access", func(t *testing.T) {
 		err := New("test")
 		var wg sync.WaitGroup
@@ -816,4 +907,322 @@ func TestContextStorage(t *testing.T) {
 			t.Errorf("expected 6 items, got %d", len(ctx))
 		}
 	})
+}
+
+// TestNewf verifies Newf behavior, including %w wrapping, formatting, and error cases.
+func TestNewf(t *testing.T) {
+	stdErrorInstance := errors.New("std error")
+	customErrorInstance := New("custom error")
+	firstErrorInstance := New("first")
+	secondErrorInstance := New("second")
+
+	tests := []struct {
+		name            string
+		format          string
+		args            []interface{}
+		wantFinalMsg    string
+		wantInternalMsg string
+		wantCause       error
+		wantErrFormat   bool
+	}{
+		// Basic formatting.
+		{
+			name:            "simple string",
+			format:          "simple %s",
+			args:            []interface{}{"test"},
+			wantFinalMsg:    "simple test",
+			wantInternalMsg: "simple test",
+		},
+		{
+			name:            "complex format without %w",
+			format:          "code=%d msg=%s",
+			args:            []interface{}{123, "hello"},
+			wantFinalMsg:    "code=123 msg=hello",
+			wantInternalMsg: "code=123 msg=hello",
+		},
+		{
+			name:            "empty format no args",
+			format:          "",
+			args:            []interface{}{},
+			wantFinalMsg:    "",
+			wantInternalMsg: "",
+		},
+
+		// %w wrapping cases.
+		{
+			name:            "wrap standard error",
+			format:          "prefix %w",
+			args:            []interface{}{stdErrorInstance},
+			wantFinalMsg:    "prefix: std error",
+			wantInternalMsg: "prefix",
+			wantCause:       stdErrorInstance,
+		},
+		{
+			name:            "wrap custom error",
+			format:          "prefix %w",
+			args:            []interface{}{customErrorInstance},
+			wantFinalMsg:    "prefix: custom error",
+			wantInternalMsg: "prefix",
+			wantCause:       customErrorInstance,
+		},
+		{
+			name:            "%w at start",
+			format:          "%w suffix",
+			args:            []interface{}{stdErrorInstance},
+			wantFinalMsg:    "suffix: std error",
+			wantInternalMsg: "suffix",
+			wantCause:       stdErrorInstance,
+		},
+		{
+			name:            "%w with flags",
+			format:          "prefix %+w suffix",
+			args:            []interface{}{stdErrorInstance},
+			wantFinalMsg:    "prefix suffix: std error",
+			wantInternalMsg: "prefix suffix",
+			wantCause:       stdErrorInstance,
+		},
+		{
+			name:            "no space around %w",
+			format:          "prefix%wsuffix",
+			args:            []interface{}{stdErrorInstance},
+			wantFinalMsg:    "prefixsuffix: std error",
+			wantInternalMsg: "prefixsuffix",
+			wantCause:       stdErrorInstance,
+		},
+		{
+			name:            "format becomes empty after removing %w",
+			format:          "%w",
+			args:            []interface{}{stdErrorInstance},
+			wantFinalMsg:    "std error",
+			wantInternalMsg: "",
+			wantCause:       stdErrorInstance,
+		},
+
+		// Error cases.
+		{
+			name:            "multiple %w",
+			format:          "%w %w",
+			args:            []interface{}{firstErrorInstance, secondErrorInstance},
+			wantFinalMsg:    `errors.Newf: format "%w %w" has multiple %w verbs`,
+			wantInternalMsg: `errors.Newf: format "%w %w" has multiple %w verbs`,
+			wantErrFormat:   true,
+		},
+		{
+			name:            "no args for %w",
+			format:          "prefix %w",
+			args:            []interface{}{},
+			wantFinalMsg:    `errors.Newf: format "prefix %w" has %w but not enough arguments`,
+			wantInternalMsg: `errors.Newf: format "prefix %w" has %w but not enough arguments`,
+			wantErrFormat:   true,
+		},
+		{
+			name:            "non-error for %w",
+			format:          "prefix %w",
+			args:            []interface{}{"not an error"},
+			wantFinalMsg:    `errors.Newf: argument 0 for %w is not a non-nil error (string)`,
+			wantInternalMsg: `errors.Newf: argument 0 for %w is not a non-nil error (string)`,
+			wantErrFormat:   true,
+		},
+		{
+			name:            "nil error for %w",
+			format:          "prefix %w",
+			args:            []interface{}{error(nil)},
+			wantFinalMsg:    `errors.Newf: argument 0 for %w is not a non-nil error (<nil>)`,
+			wantInternalMsg: `errors.Newf: argument 0 for %w is not a non-nil error (<nil>)`,
+			wantErrFormat:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Newf(tt.format, tt.args...)
+			if got == nil {
+				t.Fatalf("Newf() returned nil, expected *Error")
+			}
+
+			if gotMsg := got.Error(); gotMsg != tt.wantFinalMsg {
+				t.Errorf("Newf().Error() = %q, want %q", gotMsg, tt.wantFinalMsg)
+			}
+
+			gotCause := errors.Unwrap(got)
+			if tt.wantCause != nil {
+				if gotCause == nil {
+					t.Errorf("Newf() cause = nil, want %v (%T)", tt.wantCause, tt.wantCause)
+				} else if !errors.Is(got, tt.wantCause) {
+					t.Errorf("Newf() cause mismatch: got %v (%T), want %v (%T)", gotCause, gotCause, tt.wantCause, tt.wantCause)
+				}
+			} else if gotCause != nil {
+				t.Errorf("Newf() cause = %v (%T), want nil", gotCause, gotCause)
+			}
+
+			if tt.wantErrFormat && gotCause != nil {
+				t.Errorf("Newf() returned format error %q but unexpectedly set cause to %v", got.Error(), gotCause)
+			}
+		})
+	}
+}
+
+// TestNewfCompatibilityWithFmtErrorf compares the functional behavior of this library's
+// Newf function (when using the %w verb) with the standard library's fmt.Errorf.
+//
+// Rationale for using compareWrappedErrorStrings helper:
+//
+//  1. Goal: Ensure essential compatibility - correct error wrapping (for Unwrap/Is/As)
+//     and preservation of the message content surrounding the wrapped error.
+//  2. Formatting Difference: This library consistently formats wrapped errors in its
+//     Error() method as "MESSAGE: CAUSE_ERROR" (or just "CAUSE_ERROR" if MESSAGE is empty).
+//     The standard fmt.Errorf has more complex and variable spacing rules depending on
+//     characters around %w (e.g., sometimes omitting the colon, adding spaces differently).
+//  3. Semantic Comparison: Attempting to replicate fmt.Errorf's exact spacing makes the
+//     library code brittle and overly complex. Therefore, this test focuses on *semantic*
+//     equivalence rather than exact string matching.
+//  4. Helper Logic: compareWrappedErrorStrings verifies compatibility by:
+//     a) Checking that errors.Unwrap returns the same underlying cause instance.
+//     b) Extracting the textual prefix from this library's error string (before ": CAUSE").
+//     c) Extracting the textual remainder from fmt.Errorf's string by removing the cause string.
+//     d) Normalizing both extracted parts (trimming space, collapsing internal whitespace).
+//     e) Comparing the normalized parts to ensure the core message content matches.
+//
+// This approach ensures functional compatibility without being overly sensitive to minor
+// formatting variations between the libraries.
+func TestNewfCompatibilityWithFmtErrorf(t *testing.T) {
+	tests := []struct {
+		name   string
+		format string
+		argsFn func() []interface{} // Fresh args for each run
+	}{
+		{"simple %w", "simple %w", func() []interface{} { return []interface{}{errors.New("error")} }},
+		{"complex %s %d %w", "complex %s %d %w", func() []interface{} { return []interface{}{"test", 42, errors.New("error")} }},
+		{"no space %w next", "no space %w next", func() []interface{} { return []interface{}{errors.New("error")} }},
+		{"%w starts", "%w starts", func() []interface{} { return []interface{}{errors.New("error")} }},
+		{"format is only %w", "%w", func() []interface{} { return []interface{}{errors.New("error")} }},
+		{"%w with flags", "%+w suffix", func() []interface{} { return []interface{}{errors.New("error")} }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := tt.argsFn()
+			var causeErrArg error
+			for i := len(args) - 1; i >= 0; i-- {
+				if e, ok := args[i].(error); ok {
+					causeErrArg = e
+					break
+				}
+			}
+			if causeErrArg == nil {
+				t.Fatal("Could not find error argument for %w in test args")
+			}
+
+			stdErr := fmt.Errorf(tt.format, args...)
+			customErrImpl := Newf(tt.format, args...)
+
+			stdUnwrapped := errors.Unwrap(stdErr)
+			customUnwrapped := errors.Unwrap(customErrImpl)
+
+			if stdUnwrapped == nil || customUnwrapped == nil {
+				t.Fatalf("Expected both errors to be unwrappable")
+			}
+			if customUnwrapped != stdUnwrapped {
+				t.Errorf("Unwrapped instance mismatch\n custom: %p (%T)\n std:    %p (%T)", customUnwrapped, customUnwrapped, stdUnwrapped, stdUnwrapped)
+			}
+			if !errors.Is(customErrImpl, causeErrArg) {
+				t.Errorf("Custom error Is(cause) failed")
+			}
+
+			compareWrappedErrorStrings(t, customErrImpl.Error(), stdErr.Error(), causeErrArg.Error())
+		})
+	}
+}
+
+var errForEdgeCases = errors.New("error")
+
+// TestNewfEdgeCases covers additional Newf scenarios, such as nil interfaces,
+// escaped percent signs, and malformed formats.
+func TestNewfEdgeCases(t *testing.T) {
+	tests := []struct {
+		name      string
+		format    string
+		args      []interface{}
+		wantMsg   string
+		wantCause error
+	}{
+		{
+			name:    "nil interface arg for %v",
+			format:  "test %v",
+			args:    []interface{}{interface{}(nil)},
+			wantMsg: "test <nil>",
+		},
+		{
+			name:      "escaped %% with %w",
+			format:    "%%prefix %% %w %%suffix",
+			args:      []interface{}{errForEdgeCases},
+			wantMsg:   "%prefix % %suffix: error",
+			wantCause: errForEdgeCases,
+		},
+		{
+			name:      "malformed format ends with %",
+			format:    "test %w %",
+			args:      []interface{}{errForEdgeCases},
+			wantMsg:   `errors.Newf: format "test %w %" ends with %`,
+			wantCause: nil,
+		},
+		{
+			name:      "multiple verbs before %w",
+			format:    "%s %d %w",
+			args:      []interface{}{"foo", 42, errForEdgeCases},
+			wantMsg:   "foo 42: error",
+			wantCause: errForEdgeCases,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Newf(tt.format, tt.args...)
+			if err == nil {
+				t.Fatalf("Newf returned nil")
+			}
+
+			if gotMsg := err.Error(); gotMsg != tt.wantMsg {
+				t.Errorf("Newf().Error() = %q, want %q", gotMsg, tt.wantMsg)
+			}
+
+			gotCause := errors.Unwrap(err)
+			if tt.wantCause != nil {
+				if !errors.Is(err, tt.wantCause) {
+					t.Errorf("errors.Is(err, wantCause) failed.\n  err: [%T: %q]\n  wantCause: [%T: %q]\n  gotCause (Unwrap): [%T: %v]",
+						err, err, tt.wantCause, tt.wantCause, gotCause, gotCause)
+				}
+			} else {
+				if gotCause != nil {
+					t.Errorf("Newf() cause = [%T: %v], want nil", gotCause, gotCause)
+				}
+			}
+		})
+	}
+}
+
+// compareWrappedErrorStrings verifies semantic equivalence between custom and
+// standard library error messages, normalizing spacing differences.
+func compareWrappedErrorStrings(t *testing.T, customStr, stdStr, causeStr string) {
+	t.Helper()
+
+	var customPrefix string
+	if strings.HasSuffix(customStr, ": "+causeStr) {
+		customPrefix = strings.TrimSuffix(customStr, ": "+causeStr)
+	} else if customStr == causeStr {
+		customPrefix = ""
+	} else {
+		t.Logf("Unexpected custom error string structure: %q for cause %q", customStr, causeStr)
+		customPrefix = customStr
+	}
+
+	stdRemainder := strings.Replace(stdStr, causeStr, "", 1)
+	normCustomPrefix := strings.TrimSpace(spaceRe.ReplaceAllString(customPrefix, " "))
+	normStdRemainder := strings.TrimSpace(spaceRe.ReplaceAllString(stdRemainder, " "))
+
+	if normCustomPrefix != normStdRemainder {
+		t.Errorf("Semantic content mismatch (excluding cause):\n custom prefix: %q (from %q)\n std remainder: %q (from %q)",
+			normCustomPrefix, customStr,
+			normStdRemainder, stdStr)
+	}
 }
