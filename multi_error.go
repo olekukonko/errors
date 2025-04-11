@@ -5,7 +5,7 @@ import (
 	"math/rand"
 	"strings"
 	"sync"
-	"time"
+	"sync/atomic"
 )
 
 // MultiError represents a thread-safe collection of errors with enhanced features.
@@ -316,10 +316,21 @@ func defaultFormat(errs []error) string {
 
 // fastRand generates a quick pseudo-random number for sampling.
 // Uses a simple xorshift algorithm based on the current time; not cryptographically secure.
+var fastRandState uint32 = 1 // Must be non-zero
+
 func fastRand() uint32 {
-	r := uint32(time.Now().UnixNano())
-	r ^= r << 13
-	r ^= r >> 17
-	r ^= r << 5
-	return r
+	for {
+		// Atomically load the current state
+		old := atomic.LoadUint32(&fastRandState)
+		// Xorshift computation
+		x := old
+		x ^= x << 13
+		x ^= x >> 17
+		x ^= x << 5
+		// Attempt to store the new state atomically
+		if atomic.CompareAndSwapUint32(&fastRandState, old, x) {
+			return x
+		}
+		// Otherwise retry
+	}
 }
