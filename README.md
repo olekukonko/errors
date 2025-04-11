@@ -50,8 +50,8 @@ go get github.com/olekukonko/errors@latest
 
 > [!NOTE]  
 > ✓ added support for `errors.Errorf("user %w not found", errors.New("bob"))`  
-> ✓ added support for `chain`
-
+> ✓ added support for `sequential chain` execution
+``
 
 ## Using the `errors` Package
 
@@ -1079,8 +1079,69 @@ func main() {
   }
   fmt.Println("Order processed successfully")
 }
+```
+
+#### Sequential Task Processing 
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/olekukonko/errors"
+)
+
+// validate simulates a validation check that fails.
+func validate(name string) error {
+	return errors.Newf("validation for %s failed", name)
+}
+
+// validateOrder checks order input.
+func validateOrder() error {
+	return nil // Simulate successful validation
+}
+
+// verifyKYC handles Know Your Customer verification.
+func verifyKYC(name string) error {
+	return validate(name) // Simulate KYC validation failure
+}
+
+// processPayment handles payment processing.
+func processPayment() error {
+	return nil // Simulate successful payment
+}
+
+// processOrder coordinates the order processing workflow.
+func processOrder() error {
+	chain := errors.NewChain().
+		Step(validateOrder).     // Step 1: Validate order
+		Call(verifyKYC, "john"). // Step 2: Verify customer
+		Step(processPayment)     // Step 3: Process payment
+
+	if err := chain.Run(); err != nil {
+		return errors.Errorf("processing order: %w", err)
+	}
+	return nil
+}
+
+func main() {
+	if err := processOrder(); err != nil {
+		// Print the full error chain to stderr
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		// Output
+		// ERROR: processing order: validation for john failed
+
+		// For debugging, you could print the stack trace:
+		// errors.Inspect(err)
+		os.Exit(1)
+	}
+
+	fmt.Println("order processed successfully")
+}
 
 ```
+
 
 #### Retry with Timeout
 ```go
