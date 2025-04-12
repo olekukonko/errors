@@ -1285,38 +1285,77 @@ func (e *Error) Walk(fn func(error)) {
 	}
 }
 
-// With adds a key-value pair to the error’s context and returns the error.
+// With adds key-value pairs to the error's context and returns the error.
 // Uses a fixed-size array (smallContext) for up to contextSize items, then switches
-// to a map. Thread-safe.
+// to a map. Thread-safe. Accepts variadic key-value pairs.
 // Example:
 //
-//	err := err.With("user_id", "12345")
-func (e *Error) With(key string, value interface{}) *Error {
-	// Fast path for small context.
-	if e.smallCount < contextSize && e.context == nil {
-		e.mu.Lock()
-		if e.smallCount < contextSize && e.context == nil {
-			e.smallContext[e.smallCount] = contextItem{key, value}
-			e.smallCount++
-			e.mu.Unlock()
-			return e
-		}
-		e.mu.Unlock()
+//	err := err.With("key1", value1, "key2", value2)
+func (e *Error) With(keyValues ...interface{}) *Error {
+	if len(keyValues) == 0 {
+		return e
 	}
 
-	// Slow path with map.
+	// Validate that we have an even number of arguments
+	if len(keyValues)%2 != 0 {
+		keyValues = append(keyValues, "(MISSING)")
+	}
+
+	// Fast path for small context when we can add all pairs to smallContext
+	if e.smallCount < contextSize && e.context == nil {
+		remainingSlots := contextSize - int(e.smallCount)
+		if len(keyValues)/2 <= remainingSlots {
+			e.mu.Lock()
+			// Recheck conditions after acquiring lock
+			if e.smallCount < contextSize && e.context == nil {
+				for i := 0; i < len(keyValues); i += 2 {
+					key, ok := keyValues[i].(string)
+					if !ok {
+						key = fmt.Sprintf("%v", keyValues[i])
+					}
+					e.smallContext[e.smallCount] = contextItem{key, keyValues[i+1]}
+					e.smallCount++
+				}
+				e.mu.Unlock()
+				return e
+			}
+			e.mu.Unlock()
+		}
+	}
+
+	// Slow path - either we have too many pairs or already using map context
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// Initialize map context if needed
 	if e.context == nil {
-		e.context = make(map[string]interface{}, currentConfig.contextSize)
+		e.context = make(map[string]interface{}, max(currentConfig.contextSize, len(keyValues)/2+int(e.smallCount)))
+		// Migrate existing smallContext items
 		for i := int32(0); i < e.smallCount; i++ {
 			e.context[e.smallContext[i].key] = e.smallContext[i].value
 		}
+		// Reset smallCount since we've moved to map context
+		e.smallCount = 0
 	}
 
-	e.context[key] = value
+	// Add all pairs to map context
+	for i := 0; i < len(keyValues); i += 2 {
+		key, ok := keyValues[i].(string)
+		if !ok {
+			key = fmt.Sprintf("%v", keyValues[i])
+		}
+		e.context[key] = keyValues[i+1]
+	}
+
 	return e
+}
+
+// Helper function to get maximum of two integers
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // WithCategory sets the error’s category and returns the error.
@@ -1394,6 +1433,19 @@ func (e *Error) Wrap(cause error) *Error {
 		return e
 	}
 	e.cause = cause
+	return e
+}
+
+// Wrapf wraps a cause error with formatted message and returns the error.
+// If cause is nil, returns the error unchanged.
+// Example:
+//
+//	err := errors.New("base").Wrapf(io.EOF, "read failed: %s", "file.txt")
+func (e *Error) Wrapf(cause error, format string, args ...interface{}) *Error {
+	e.msg = fmt.Sprintf(format, args...)
+	if cause != nil {
+		e.cause = cause
+	}
 	return e
 }
 

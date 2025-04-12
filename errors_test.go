@@ -1273,3 +1273,163 @@ func compareWrappedErrorStrings(t *testing.T, customStr, stdStr, causeStr string
 			normStdRemainder, stdStr)
 	}
 }
+
+func TestWithVariadic(t *testing.T) {
+	t.Run("single key-value", func(t *testing.T) {
+		err := New("test").With("key1", "value1")
+		if val, ok := err.Context()["key1"]; !ok || val != "value1" {
+			t.Errorf("Expected key1=value1, got %v", val)
+		}
+	})
+
+	t.Run("multiple key-values", func(t *testing.T) {
+		err := New("test").With("key1", 1, "key2", 2, "key3", 3)
+		ctx := err.Context()
+		if ctx["key1"] != 1 || ctx["key2"] != 2 || ctx["key3"] != 3 {
+			t.Errorf("Expected all keys to be set, got %v", ctx)
+		}
+	})
+
+	t.Run("odd number of args", func(t *testing.T) {
+		err := New("test").With("key1", 1, "key2")
+		ctx := err.Context()
+		if ctx["key1"] != 1 || ctx["key2"] != "(MISSING)" {
+			t.Errorf("Expected key1=1 and key2=(MISSING), got %v", ctx)
+		}
+	})
+
+	t.Run("non-string keys", func(t *testing.T) {
+		err := New("test").With(123, "value1", true, "value2")
+		ctx := err.Context()
+		if ctx["123"] != "value1" || ctx["true"] != "value2" {
+			t.Errorf("Expected converted keys, got %v", ctx)
+		}
+	})
+
+	t.Run("transition to map context", func(t *testing.T) {
+		// Assuming contextSize is 4
+		err := New("test").
+			With("k1", 1, "k2", 2, "k3", 3, "k4", 4). // fills smallContext
+			With("k5", 5)                             // should trigger map transition
+
+		if err.smallCount != 0 {
+			t.Error("Expected smallCount to be 0 after transition")
+		}
+		if len(err.context) != 5 {
+			t.Error("Expected all 5 items in map context")
+		}
+	})
+
+	t.Run("concurrent access", func(t *testing.T) {
+		err := New("test")
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			err.With("key1", 1, "key2", 2)
+		}()
+
+		go func() {
+			defer wg.Done()
+			err.With("key3", 3, "key4", 4)
+		}()
+
+		wg.Wait()
+		ctx := err.Context()
+		if len(ctx) != 4 {
+			t.Errorf("Expected 4 items in context, got %d", len(ctx))
+		}
+	})
+
+	t.Run("mixed existing context", func(t *testing.T) {
+		err := New("test").
+			With("k1", 1).                           // smallContext
+			With("k2", 2, "k3", 3, "k4", 4, "k5", 5) // some in small, some in map
+
+		if len(err.context) != 5 {
+			t.Errorf("Expected 5 items total, got %d", len(err.context))
+		}
+	})
+
+	t.Run("large number of pairs", func(t *testing.T) {
+		err := New("test")
+		args := make([]interface{}, 20)
+		for i := 0; i < 10; i++ {
+			args[i*2] = i
+			args[i*2+1] = i * 10
+		}
+		err = err.With(args...)
+
+		ctx := err.Context()
+		if len(ctx) != 10 {
+			t.Errorf("Expected 10 items, got %d", len(ctx))
+		}
+		if ctx["5"] != 50 {
+			t.Errorf("Expected ctx[5]=50, got %v", ctx["5"])
+		}
+	})
+}
+
+func TestWrapf(t *testing.T) {
+	t.Run("basic wrapf", func(t *testing.T) {
+		cause := New("cause")
+		err := New("wrapper").Wrapf(cause, "formatted %s", "message")
+
+		if err.Unwrap() != cause {
+			t.Error("Unwrap() should return the cause")
+		}
+		if err.Error() != "formatted message: cause" {
+			t.Errorf("Expected 'formatted message: cause', got '%s'", err.Error())
+		}
+	})
+
+	t.Run("nil cause", func(t *testing.T) {
+		err := New("wrapper").Wrapf(nil, "format %s", "test")
+		if err.Unwrap() != nil {
+			t.Error("Unwrap() should return nil for nil cause")
+		}
+		if err.Error() != "format test" {
+			t.Errorf("Expected 'format test', got '%s'", err.Error())
+		}
+	})
+
+	t.Run("complex formatting", func(t *testing.T) {
+		cause := New("cause")
+		err := New("wrapper").Wrapf(cause, "value: %d, str: %s", 42, "hello")
+
+		if err.Error() != "value: 42, str: hello: cause" {
+			t.Errorf("Expected complex formatting, got '%s'", err.Error())
+		}
+	})
+
+	t.Run("wrapf with std error", func(t *testing.T) {
+		stdErr := errors.New("io error")
+		err := New("wrapper").Wrapf(stdErr, "operation failed after %d attempts", 3)
+
+		if err.Unwrap() != stdErr {
+			t.Error("Should be able to wrap standard errors with Wrapf")
+		}
+		if err.Error() != "operation failed after 3 attempts: io error" {
+			t.Errorf("Expected formatted message with cause, got '%s'", err.Error())
+		}
+	})
+
+	t.Run("preserves other fields", func(t *testing.T) {
+		cause := New("cause").WithCode(404)
+		err := New("wrapper").
+			With("key", "value").
+			WithCode(500).
+			Wrapf(cause, "formatted")
+
+		if err.Code() != 500 {
+			t.Error("Wrapf should preserve error code")
+		}
+		if val, ok := err.Context()["key"]; !ok || val != "value" {
+			t.Error("Wrapf should preserve context")
+		}
+		if err.Unwrap().(*Error).Code() != 404 {
+			t.Error("Should preserve cause's code")
+		}
+	})
+}
