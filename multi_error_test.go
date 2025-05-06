@@ -2,9 +2,11 @@
 package errors
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"testing"
 )
 
@@ -130,6 +132,135 @@ func TestMultiError_AsSingle(t *testing.T) {
 		m.Add(errors.New("test2"))
 		if m.Single() != m {
 			t.Errorf("Should return self for multiple errors, got %v", m.Single())
+		}
+	})
+}
+
+// TestMultiError_MarshalJSON tests the JSON serialization of MultiError.
+// Verifies correct output for empty, single-error, multiple-error, and mixed-error cases.
+func TestMultiError_MarshalJSON(t *testing.T) {
+	// Subtest: Empty
+	t.Run("Empty", func(t *testing.T) {
+		m := NewMultiError()
+		data, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("MarshalJSON failed: %v", err)
+		}
+
+		expected := `{"count":0,"errors":[]}`
+		if string(data) != expected {
+			t.Errorf("Expected %q, got %q", expected, string(data))
+		}
+	})
+
+	// Subtest: Single standard error
+	t.Run("SingleStandardError", func(t *testing.T) {
+		m := NewMultiError()
+		err := errors.New("timeout")
+		m.Add(err)
+
+		data, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("MarshalJSON failed: %v", err)
+		}
+
+		expected := `{"count":1,"errors":[{"error":"timeout"}]}`
+		var expectedJSON, actualJSON interface{}
+		if err := json.Unmarshal([]byte(expected), &expectedJSON); err != nil {
+			t.Fatalf("Failed to parse expected JSON: %v", err)
+		}
+		if err := json.Unmarshal(data, &actualJSON); err != nil {
+			t.Fatalf("Failed to parse actual JSON: %v", err)
+		}
+
+		if !reflect.DeepEqual(expectedJSON, actualJSON) {
+			t.Errorf("JSON output mismatch.\nGot: %s\nWant: %s", string(data), expected)
+		}
+	})
+
+	// Subtest: Multiple errors including *Error
+	t.Run("MultipleMixedErrors", func(t *testing.T) {
+		m := NewMultiError(WithLimit(5))                          // No sampling to ensure all errors are added
+		m.Add(New("db error").WithCode(500).With("user_id", 123)) // *Error
+		m.Add(errors.New("timeout"))                              // Standard error
+		m.Add(nil)                                                // Nil error (skipped by Add)
+
+		data, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("MarshalJSON failed: %v", err)
+		}
+
+		expected := `{
+            "count":2,
+            "limit":5,
+            "errors":[
+                {"error":{"message":"db error","context":{"user_id":123},"code":500}},
+                {"error":"timeout"}
+            ]
+        }`
+		var expectedJSON, actualJSON interface{}
+		if err := json.Unmarshal([]byte(expected), &expectedJSON); err != nil {
+			t.Fatalf("Failed to parse expected JSON: %v", err)
+		}
+		if err := json.Unmarshal(data, &actualJSON); err != nil {
+			t.Fatalf("Failed to parse actual JSON: %v", err)
+		}
+
+		if !reflect.DeepEqual(expectedJSON, actualJSON) {
+			t.Errorf("JSON output mismatch.\nGot: %s\nWant: %s", string(data), expected)
+		}
+	})
+
+	// Subtest: Concurrent access to ensure thread safety
+	t.Run("Concurrent", func(t *testing.T) {
+		m := NewMultiError()
+		err1 := New("error1").WithCode(400)
+		err2 := errors.New("error2")
+		m.Add(err1)
+		m.Add(err2)
+
+		// Run multiple goroutines to marshal concurrently
+		const numGoroutines = 10
+		results := make(chan []byte, numGoroutines)
+		errorsChan := make(chan error, numGoroutines)
+
+		for i := 0; i < numGoroutines; i++ {
+			go func() {
+				data, err := json.Marshal(m)
+				if err != nil {
+					errorsChan <- err
+					return
+				}
+				results <- data
+			}()
+		}
+
+		// Collect results
+		expected := `{
+            "count":2,
+            "errors":[
+                {"error":{"message":"error1","code":400}},
+                {"error":"error2"}
+            ]
+        }`
+		var expectedJSON interface{}
+		if err := json.Unmarshal([]byte(expected), &expectedJSON); err != nil {
+			t.Fatalf("Failed to parse expected JSON: %v", err)
+		}
+
+		for i := 0; i < numGoroutines; i++ {
+			select {
+			case err := <-errorsChan:
+				t.Errorf("Concurrent MarshalJSON failed: %v", err)
+			case data := <-results:
+				var actualJSON interface{}
+				if err := json.Unmarshal(data, &actualJSON); err != nil {
+					t.Errorf("Failed to parse actual JSON: %v", err)
+				}
+				if !reflect.DeepEqual(expectedJSON, actualJSON) {
+					t.Errorf("Concurrent JSON output mismatch.\nGot: %s\nWant: %s", string(data), expected)
+				}
+			}
 		}
 	})
 }

@@ -1,6 +1,8 @@
 package errors
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -79,6 +81,11 @@ func (m *MultiError) Add(err error) {
 	}
 
 	m.errors = append(m.errors, err)
+}
+
+// Addf formats and adds a new error to the collection.
+func (m *MultiError) Addf(format string, args ...interface{}) {
+	m.Add(Newf(format, args...))
 }
 
 // Clear removes all errors from the collection.
@@ -298,6 +305,75 @@ func WithRand(r *rand.Rand) MultiErrorOption {
 	return func(m *MultiError) {
 		m.rand = r
 	}
+}
+
+// MarshalJSON serializes the MultiError to JSON, including all contained errors and configuration metadata.
+// Thread-safe; errors are serialized using their MarshalJSON method if available, otherwise as strings.
+func (m *MultiError) MarshalJSON() ([]byte, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Get buffer from pool for efficiency
+	buf := jsonBufferPool.Get().(*bytes.Buffer)
+	defer jsonBufferPool.Put(buf)
+	buf.Reset()
+
+	// Create encoder
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+
+	// Define JSON structure
+	type jsonError struct {
+		Error interface{} `json:"error"` // Holds either JSON-marshaled error or string
+	}
+
+	je := struct {
+		Count      int         `json:"count"`                 // Number of errors
+		Limit      int         `json:"limit,omitempty"`       // Maximum error limit (omitted if 0)
+		Sampling   bool        `json:"sampling,omitempty"`    // Whether sampling is enabled
+		SampleRate uint32      `json:"sample_rate,omitempty"` // Sampling rate (1-100, omitted if not sampling)
+		Errors     []jsonError `json:"errors"`                // List of errors
+	}{
+		Count:      len(m.errors),
+		Limit:      m.limit,
+		Sampling:   m.sampling,
+		SampleRate: m.sampleRate,
+	}
+
+	// Serialize each error
+	je.Errors = make([]jsonError, len(m.errors))
+	for i, err := range m.errors {
+		if err == nil {
+			je.Errors[i] = jsonError{Error: nil}
+			continue
+		}
+		// Check if the error implements json.Marshaler
+		if marshaler, ok := err.(json.Marshaler); ok {
+			marshaled, err := marshaler.MarshalJSON()
+			if err != nil {
+				// Fallback to string if marshaling fails
+				je.Errors[i] = jsonError{Error: err.Error()}
+			} else {
+				var raw json.RawMessage = marshaled
+				je.Errors[i] = jsonError{Error: raw}
+			}
+		} else {
+			// Use error string for non-marshaler errors
+			je.Errors[i] = jsonError{Error: err.Error()}
+		}
+	}
+
+	// Encode JSON
+	if err := enc.Encode(je); err != nil {
+		return nil, fmt.Errorf("failed to marshal MultiError: %v", err)
+	}
+
+	// Remove trailing newline
+	result := buf.Bytes()
+	if len(result) > 0 && result[len(result)-1] == '\n' {
+		result = result[:len(result)-1]
+	}
+	return result, nil
 }
 
 // defaultFormat provides the default formatting for multiple errors.
