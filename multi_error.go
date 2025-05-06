@@ -47,40 +47,51 @@ func NewMultiError(opts ...MultiErrorOption) *MultiError {
 
 // Add appends an error to the collection with optional sampling, limit checks, and duplicate prevention.
 // Ignores nil errors and duplicates based on string equality; thread-safe.
-func (m *MultiError) Add(err error) {
-	if err == nil {
+func (m *MultiError) Add(errs ...error) {
+	if len(errs) == 0 {
 		return
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check for duplicates by comparing error messages
-	for _, e := range m.errors {
-		if e.Error() == err.Error() {
-			return
+	for _, err := range errs {
+		if err == nil {
+			continue
 		}
-	}
 
-	// Apply sampling if enabled and collection isn’t empty
-	if m.sampling && len(m.errors) > 0 {
-		var r uint32
-		if m.rand != nil {
-			r = uint32(m.rand.Int31n(100))
-		} else {
-			r = fastRand() % 100
+		// Check for duplicates by comparing error messages
+		duplicate := false
+		for _, e := range m.errors {
+			if e.Error() == err.Error() {
+				duplicate = true
+				break
+			}
 		}
-		if r > m.sampleRate { // Accept if random value is within sample rate
-			return
+		if duplicate {
+			continue
 		}
-	}
 
-	// Respect limit if set
-	if m.limit > 0 && len(m.errors) >= m.limit {
-		return
-	}
+		// Apply sampling if enabled and collection isn’t empty
+		if m.sampling && len(m.errors) > 0 {
+			var r uint32
+			if m.rand != nil {
+				r = uint32(m.rand.Int31n(100))
+			} else {
+				r = fastRand() % 100
+			}
+			if r > m.sampleRate { // Accept if random value is within sample rate
+				continue
+			}
+		}
 
-	m.errors = append(m.errors, err)
+		// Respect limit if set
+		if m.limit > 0 && len(m.errors) >= m.limit {
+			continue
+		}
+
+		m.errors = append(m.errors, err)
+	}
 }
 
 // Addf formats and adds a new error to the collection.
