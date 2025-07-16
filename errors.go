@@ -175,7 +175,7 @@ func newError() *Error {
 //
 //	err := errors.Empty().With("key", "value").WithCode(400)
 func Empty() *Error {
-	return emptyError
+	return newError()
 }
 
 // Named creates an error with the specified name and captures a stack trace.
@@ -219,7 +219,6 @@ func New(text string) *Error {
 func Newf(format string, args ...interface{}) *Error {
 	err := newError()
 
-	// --- Start: Parsing and Validation (mostly unchanged) ---
 	var wCount int
 	var wArgPos = -1
 	var wArg error
@@ -359,11 +358,10 @@ func Newf(format string, args ...interface{}) *Error {
 		err.formatWrapped = false
 		return err
 	}
-	// --- End: Parsing and Validation ---
 
-	// --- Start: Processing Valid Format String ---
+	//  Start: Processing Valid Format String
 	if wCount == 1 && wArg != nil {
-		// --- Handle %w: Simulate for Sprintf and pre-format ---
+		//  Handle %w: Simulate for Sprintf and pre-format
 		err.cause = wArg         // Set the cause for unwrapping
 		err.formatWrapped = true // Signal that msg is the final formatted string
 
@@ -400,10 +398,10 @@ func Newf(format string, args ...interface{}) *Error {
 			// Store the final, fully formatted string, matching fmt.Errorf output
 			err.msg = result
 		}
-		// --- End %w Simulation ---
+		//  End %w Simulation
 
 	} else {
-		// --- No %w or wArg is nil: Format directly (original logic) ---
+		//  No %w or wArg is nil: Format directly (original logic)
 		result, fmtErr := FmtErrorCheck(format, args...)
 		if fmtErr != nil {
 			err.msg = fmt.Sprintf("errors.Newf: formatting error for format %q: %v", format, fmtErr)
@@ -414,7 +412,7 @@ func Newf(format string, args ...interface{}) *Error {
 			err.formatWrapped = false // Ensure false if no %w was involved
 		}
 	}
-	// --- End: Processing Valid Format String ---
+	//  End: Processing Valid Format String
 
 	return err
 }
@@ -703,8 +701,8 @@ func (e *Error) Error() string {
 		return e.msg // Return the pre-formatted fmt.Errorf-compatible string
 	}
 
-	// --- Original logic for errors not created via Newf("%w", ...) ---
-	// --- or errors created via New/Named and then Wrap() called. ---
+	//  Original logic for errors not created via Newf("%w", ...)
+	//  or errors created via New/Named and then Wrap() called.
 	var buf strings.Builder
 
 	// Append primary message part (msg, template, or name)
