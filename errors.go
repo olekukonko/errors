@@ -449,38 +449,6 @@ func FmtErrorCheck(format string, args ...interface{}) (result string, err error
 	return result, nil
 }
 
-// countFmtArgs counts format specifiers that consume arguments in a format string.
-// Ignores %% and non-consuming verbs like %n.
-// Internal use by Newf for argument validation.
-func countFmtArgs(format string) int {
-	count := 0
-	runes := []rune(format)
-	i := 0
-	for i < len(runes) {
-		if runes[i] == '%' {
-			if i+1 < len(runes) && runes[i+1] == '%' {
-				i += 2 // Skip %%
-				continue
-			}
-			i++ // Move past %
-			for i < len(runes) && (runes[i] == '+' || runes[i] == '-' || runes[i] == '#' ||
-				runes[i] == ' ' || runes[i] == '0' ||
-				(runes[i] >= '1' && runes[i] <= '9') || runes[i] == '.') {
-				i++
-			}
-			if i < len(runes) {
-				if strings.ContainsRune("vTtbcdoqxXUeEfFgGsp", runes[i]) {
-					count++
-				}
-				i++ // Move past verb
-			}
-		} else {
-			i++
-		}
-	}
-	return count
-}
-
 // Std creates a standard error using errors.New for compatibility.
 // Does not capture stack traces or add context.
 // Example:
