@@ -95,6 +95,10 @@ type contextItem struct {
 // context, cause, and metadata like code and category. It is thread-safe and
 // supports pooling for performance.
 type Error struct {
+	// Fields used in atomic operations. Place them at the beginning of the
+	// struct to ensure proper alignment across all architectures.
+	count uint64 // Occurrence count for tracking frequency.
+
 	// Primary fields (frequently accessed).
 	msg   string    // The error message displayed by Error().
 	name  string    // The error name or type (e.g., "AuthError").
@@ -103,7 +107,6 @@ type Error struct {
 	// Secondary metadata.
 	template   string // Fallback message template if msg is empty.
 	category   string // Error category (e.g., "network").
-	count      uint64 // Occurrence count for tracking frequency.
 	code       int32  // HTTP-like status code (e.g., 400, 500).
 	smallCount int32  // Number of items in smallContext.
 
