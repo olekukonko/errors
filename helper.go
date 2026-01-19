@@ -430,3 +430,8 @@ func Wrapf(err error, format string, args ...interface{}) *Error {
 	e.cause = err
 	return e
 }
+
+// WrapErr creates a new Error with the given message and wraps the provided error as its cause.
+func WrapErr(msg string, err error) *Error {
+	return New(msg).Wrap(err)
+}
