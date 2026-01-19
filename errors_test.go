@@ -1434,9 +1434,9 @@ func TestWrapf(t *testing.T) {
 	})
 }
 
-func TestNewfW(t *testing.T) {
+func TestWrapping(t *testing.T) {
 	cause := New("root cause")
-	err := Newf("wrap it: %s", cause)
+	err := Err("wrap it", cause)
 	if err == nil {
 		t.Fatal("expected non-nil error")
 	}
@@ -1446,4 +1446,16 @@ func TestNewfW(t *testing.T) {
 	if err.Error() != "wrap it: root cause" {
 		t.Fatalf("wrong message: %q", err.Error())
 	}
+
+	err = Newf("wrap it: %w", cause)
+	if err == nil {
+		t.Fatal("expected non-nil error")
+	}
+	if !Is(err, cause) {
+		t.Fatal("wrapping failed")
+	}
+	if err.Error() != "wrap it: root cause" {
+		t.Fatalf("wrong message: %q", err.Error())
+	}
+
 }

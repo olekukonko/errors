@@ -216,7 +216,16 @@ func New(text string) *Error {
 //	err := errors.Newf("query failed: %w", cause)
 //	// err.Error() will match fmt.Errorf("query failed: %w", cause).Error()
 //	// errors.Unwrap(err) == cause
-func Newf(format string, args ...interface{}) *Error {
+func Newf(f any, args ...interface{}) *Error {
+	var format string
+	switch v := f.(type) {
+	case string:
+		format = v
+	case fmt.Stringer:
+		format = v.String()
+	default:
+		panic("Newf: format must be a string or fmt.Stringer")
+	}
 	err := newError()
 
 	var wCount int

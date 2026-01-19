@@ -431,7 +431,7 @@ func Wrapf(err error, format string, args ...interface{}) *Error {
 	return e
 }
 
-// WrapErr creates a new Error with the given message and wraps the provided error as its cause.
-func WrapErr(msg string, err error) *Error {
+// Err creates a new Error with the given message and wraps the provided error as its cause.
+func Err(msg string, err error) *Error {
 	return New(msg).Wrap(err)
 }
