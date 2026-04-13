@@ -822,6 +822,8 @@ func TestErrorFromContext(t *testing.T) {
 func TestContextStorage(t *testing.T) {
 	// Test smallContext for first 4 items.
 	t.Run("stores first 4 items in smallContext", func(t *testing.T) {
+		Configure(Config{DisablePooling: true})
+
 		err := New("test")
 
 		err.With("a", 1)
@@ -839,6 +841,8 @@ func TestContextStorage(t *testing.T) {
 
 	// Test expansion to map on 5th item.
 	t.Run("switches to map on 5th item", func(t *testing.T) {
+		Configure(Config{DisablePooling: true})
+
 		err := New("test")
 
 		err.With("a", 1)
@@ -883,6 +887,8 @@ func TestContextStorage(t *testing.T) {
 
 	// Test concurrent access safety.
 	t.Run("concurrent access", func(t *testing.T) {
+		Configure(Config{DisablePooling: true})
+
 		err := New("test")
 		var wg sync.WaitGroup
 		wg.Add(2)
