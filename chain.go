@@ -114,6 +114,39 @@ func (c *Chain) Step(fn func() error) *Chain {
 	return c
 }
 
+// StepCtx adds a context-aware step to the chain. The provided function
+// receives the chain's context (which carries any chain-level deadline/timeout),
+// so cancellation and timeouts propagate correctly into blocking operations such
+// as HTTP requests, database queries, or gRPC calls.
+//
+// StepCtx is the context-safe alternative to Step; existing Step calls are
+// unchanged and fully compatible.
+//
+// Example:
+//
+//	chain := NewChain(ChainWithTimeout(5 * time.Second)).
+//		StepCtx(func(ctx context.Context) error {
+//			req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+//			_, err := http.DefaultClient.Do(req)
+//			return err
+//		})
+func (c *Chain) StepCtx(fn func(ctx context.Context) error) *Chain {
+	if fn == nil {
+		panic("Chain.StepCtx: provided function cannot be nil")
+	}
+	// Wrap fn so it satisfies the internal func() error signature used by
+	// executeStep. The context is captured at execution time via getContextAndCancel.
+	wrapped := func() error {
+		ctx, cancel := c.getContextAndCancel()
+		defer cancel()
+		return fn(ctx)
+	}
+	step := chainStep{execute: wrapped, config: stepConfig{}}
+	c.steps = append(c.steps, step)
+	c.lastStep = &c.steps[len(c.steps)-1]
+	return c
+}
+
 // Call adds a step by wrapping a function with arguments.
 // It uses reflection to validate and invoke the function.
 func (c *Chain) Call(fn interface{}, args ...interface{}) *Chain {
