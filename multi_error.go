@@ -366,9 +366,10 @@ func (m *MultiError) MarshalJSON() ([]byte, error) {
 		}
 		// Check if the error implements json.Marshaler
 		if marshaler, ok := err.(json.Marshaler); ok {
-			marshaled, err := marshaler.MarshalJSON()
-			if err != nil {
-				// Fallback to string if marshaling fails
+			// Use marshalErr (not err) to avoid shadowing the loop variable.
+			marshaled, marshalErr := marshaler.MarshalJSON()
+			if marshalErr != nil {
+				// Fallback reports the ORIGINAL error message, not the marshal failure.
 				je.Errors[i] = jsonError{Error: err.Error()}
 			} else {
 				var raw json.RawMessage = marshaled

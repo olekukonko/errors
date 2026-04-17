@@ -6,6 +6,7 @@ import (
 	"log/slog" // Standard structured logging package
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,6 +19,8 @@ type Chain struct {
 	lastStep   *chainStep         // Pointer to the last added step for configuration
 	logHandler slog.Handler       // Optional logging handler (nil means no logging)
 	cancel     context.CancelFunc // Function to cancel the context
+	runCtx     context.Context    // Active context for Run/RunAll; shared with StepCtx closures
+	configMu   sync.RWMutex       // Protects chainConfig against concurrent Timeout() calls
 }
 
 // chainStep represents a single step in the chain.
@@ -136,9 +139,14 @@ func (c *Chain) StepCtx(fn func(ctx context.Context) error) *Chain {
 	}
 	// Wrap fn so it satisfies the internal func() error signature used by
 	// executeStep. The context is captured at execution time via getContextAndCancel.
+	// Close over c.runCtx — set by Run/RunAll to the chain-level context.
+	// This ensures StepCtx steps share the same deadline as the chain,
+	// rather than each getting a fresh full-duration context.
 	wrapped := func() error {
-		ctx, cancel := c.getContextAndCancel()
-		defer cancel()
+		ctx := c.runCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
 		return fn(ctx)
 	}
 	step := chainStep{execute: wrapped, config: stepConfig{}}
@@ -186,8 +194,11 @@ func (c *Chain) WithLog(attrs ...slog.Attr) *Chain {
 }
 
 // Timeout sets a timeout for the entire chain.
+// Thread-safe: protected by configMu.
 func (c *Chain) Timeout(d time.Duration) *Chain {
+	c.configMu.Lock()
 	c.config.timeout = d
+	c.configMu.Unlock()
 	return c
 }
 
@@ -293,6 +304,7 @@ func (c *Chain) Run() error {
 	ctx, cancel := c.getContextAndCancel()
 	defer cancel()
 	c.cancel = cancel
+	c.runCtx = ctx // share deadline with StepCtx closures
 	// Clear any previous errors
 	c.errors = c.errors[:0]
 
@@ -342,6 +354,7 @@ func (c *Chain) RunAll() error {
 	ctx, cancel := c.getContextAndCancel()
 	defer cancel()
 	c.cancel = cancel
+	c.runCtx = ctx // share deadline with StepCtx closures
 	c.errors = c.errors[:0]
 	multi := NewMultiError()
 
@@ -437,11 +450,12 @@ func (c *Chain) Unwrap() []error {
 // It returns a context and its cancellation function.
 func (c *Chain) getContextAndCancel() (context.Context, context.CancelFunc) {
 	parentCtx := context.Background()
-	if c.config.timeout > 0 {
-		// Create a context with a timeout
-		return context.WithTimeout(parentCtx, c.config.timeout)
+	c.configMu.RLock()
+	timeout := c.config.timeout
+	c.configMu.RUnlock()
+	if timeout > 0 {
+		return context.WithTimeout(parentCtx, timeout)
 	}
-	// Create a cancellable context
 	return context.WithCancel(parentCtx)
 }
 
