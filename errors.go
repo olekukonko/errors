@@ -509,12 +509,20 @@ func (e *Error) As(target interface{}) bool {
 	if e == nil {
 		return false
 	}
-	// Handle *Error target.
-	if targetPtr, ok := target.(*Error); ok {
+	// Handle **Error target (i.e. caller passed &myErrPtr where myErrPtr is *Error).
+	// Traverse the chain and return the first *Error that has a name; if none has a
+	// name, return the first *Error in the chain. This satisfies both:
+	//   - TestErrorAs: wraps Named("target") -> finds it by name
+	//   - TestErrorFullChain: finds Named("AuthError") deep in the chain
+	if targetPtr, ok := target.(**Error); ok {
+		var first *Error
 		current := e
 		for current != nil {
+			if first == nil {
+				first = current
+			}
 			if current.name != "" {
-				*targetPtr = *current
+				*targetPtr = current
 				return true
 			}
 			if next, ok := current.cause.(*Error); ok {
@@ -522,8 +530,12 @@ func (e *Error) As(target interface{}) bool {
 			} else if current.cause != nil {
 				return errors.As(current.cause, target)
 			} else {
-				return false
+				break
 			}
+		}
+		if first != nil {
+			*targetPtr = first
+			return true
 		}
 		return false
 	}
@@ -622,6 +634,8 @@ func (e *Error) Copy() *Error {
 	newErr.code = e.code
 	newErr.category = e.category
 	newErr.count = e.count
+	newErr.callback = e.callback           // was silently dropped by Copy
+	newErr.formatWrapped = e.formatWrapped // was silently dropped by Copy
 
 	if e.smallCount > 0 {
 		newErr.smallCount = e.smallCount
@@ -1016,9 +1030,12 @@ var (
 //	data, _ := json.Marshal(err)
 //	fmt.Println(string(data))
 func (e *Error) MarshalJSON() ([]byte, error) {
-	// Get buffer from pool.
+	// Get buffer from pool. Do NOT defer-return it — we must copy the result
+	// out of buf's backing array and return the buf to the pool BEFORE we return
+	// the copied slice. If we defer the Put, another goroutine can Get the same
+	// buf and overwrite its backing array while the caller is still reading our
+	// returned slice (the race the detector flags).
 	buf := jsonBufferPool.Get().(*bytes.Buffer)
-	defer jsonBufferPool.Put(buf)
 	buf.Reset()
 
 	// Create new encoder.
@@ -1066,11 +1083,16 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 
-	// Remove trailing newline.
-	result := buf.Bytes()
-	if len(result) > 0 && result[len(result)-1] == '\n' {
-		result = result[:len(result)-1]
+	// Copy bytes out of buf before returning buf to the pool.
+	// buf.Bytes() is a slice into buf's internal array — if we put buf back first
+	// and another goroutine resets it, they share the same backing memory.
+	raw := buf.Bytes()
+	if len(raw) > 0 && raw[len(raw)-1] == '\n' {
+		raw = raw[:len(raw)-1]
 	}
+	result := make([]byte, len(raw))
+	copy(result, raw)
+	jsonBufferPool.Put(buf)
 	return result, nil
 }
 
@@ -1164,7 +1186,8 @@ func (e *Error) Stack() []string {
 //
 //	err := errors.New("failed").Trace()
 func (e *Error) Trace() *Error {
-	if e.stack == nil {
+	// Check len rather than nil for the same reason as WithStack.
+	if len(e.stack) == 0 {
 		e.stack = captureStack(2)
 	}
 	return e
@@ -1279,31 +1302,30 @@ func (e *Error) With(keyValues ...interface{}) *Error {
 		keyValues = append(keyValues, "(MISSING)")
 	}
 
-	// Fast path for small context when we can add all pairs to smallContext
+	// Acquire the lock once up-front. The previous "optimistic read then lock"
+	// pattern read e.smallCount and e.context without holding the lock, which
+	// the race detector correctly flagged as a data race when two goroutines
+	// call With() on the same *Error concurrently.
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Fast path: all pairs fit in the fixed-size smallContext array.
 	if e.smallCount < contextSize && e.context == nil {
 		remainingSlots := contextSize - int(e.smallCount)
 		if len(keyValues)/2 <= remainingSlots {
-			e.mu.Lock()
-			// Recheck conditions after acquiring lock
-			if e.smallCount < contextSize && e.context == nil {
-				for i := 0; i < len(keyValues); i += 2 {
-					key, ok := keyValues[i].(string)
-					if !ok {
-						key = fmt.Sprintf("%v", keyValues[i])
-					}
-					e.smallContext[e.smallCount] = contextItem{key, keyValues[i+1]}
-					e.smallCount++
+			for i := 0; i < len(keyValues); i += 2 {
+				key, ok := keyValues[i].(string)
+				if !ok {
+					key = fmt.Sprintf("%v", keyValues[i])
 				}
-				e.mu.Unlock()
-				return e
+				e.smallContext[e.smallCount] = contextItem{key, keyValues[i+1]}
+				e.smallCount++
 			}
-			e.mu.Unlock()
+			return e
 		}
 	}
 
-	// Slow path - either we have too many pairs or already using map context
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	// Slow path: too many pairs or already using map context.
 
 	// Initialize map context if needed
 	if e.context == nil {
@@ -1377,7 +1399,9 @@ func (e *Error) WithRetryable() *Error {
 //
 //	err := errors.New("failed").WithStack()
 func (e *Error) WithStack() *Error {
-	if e.stack == nil {
+	// Check len rather than nil: a pooled error has stack reset to stack[:0]
+	// (non-nil but empty). The nil check would skip capture for recycled errors.
+	if len(e.stack) == 0 {
 		e.stack = captureStack(1)
 	}
 	return e

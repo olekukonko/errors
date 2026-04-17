@@ -1,4 +1,3 @@
-// pool.go
 package errors
 
 import (

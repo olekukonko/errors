@@ -916,7 +916,6 @@ func TestContextStorage(t *testing.T) {
 }
 
 // TestNewf verifies Newf behavior, including %w wrapping, formatting, and error cases.
-// errors_test.go
 
 // TestNewf verifies Newf behavior, including %w wrapping, formatting, and error cases.
 // It now expects the string output for %w cases to match fmt.Errorf.
@@ -959,7 +958,7 @@ func TestNewf(t *testing.T) {
 			wantInternalMsg: "",
 		},
 
-		// --- %w wrapping cases (EXPECTATIONS UPDATED) ---
+		// %w wrapping cases (EXPECTATIONS UPDATED)
 		{
 			name:            "wrap standard error",
 			format:          "prefix %w",
@@ -1061,7 +1060,7 @@ func TestNewf(t *testing.T) {
 				t.Errorf("Newf().Error() = %q, want %q", gotMsg, tt.wantFinalMsg)
 			}
 
-			// --- Cause verification remains crucial ---
+			// Cause verification remains crucial
 			gotCause := errors.Unwrap(got)
 			if tt.wantCause != nil {
 				// Use errors.Is for robust checking, especially if causes might be wrapped themselves
@@ -1097,21 +1096,28 @@ func TestNewf(t *testing.T) {
 //
 // Rationale for using compareWrappedErrorStrings helper:
 //
-//  1. Goal: Ensure essential compatibility - correct error wrapping (for Unwrap/Is/As)
-//     and preservation of the message content surrounding the wrapped error.
-//  2. Formatting Difference: This library consistently formats wrapped errors in its
-//     Error() method as "MESSAGE: CAUSE_ERROR" (or just "CAUSE_ERROR" if MESSAGE is empty).
-//     The standard fmt.Errorf has more complex and variable spacing rules depending on
-//     characters around %w (e.g., sometimes omitting the colon, adding spaces differently).
-//  3. Semantic Comparison: Attempting to replicate fmt.Errorf's exact spacing makes the
-//     library code brittle and overly complex. Therefore, this test focuses on *semantic*
-//     equivalence rather than exact string matching.
-//  4. Helper Logic: compareWrappedErrorStrings verifies compatibility by:
-//     a) Checking that errors.Unwrap returns the same underlying cause instance.
-//     b) Extracting the textual prefix from this library's error string (before ": CAUSE").
-//     c) Extracting the textual remainder from fmt.Errorf's string by removing the cause string.
-//     d) Normalizing both extracted parts (trimming space, collapsing internal whitespace).
-//     e) Comparing the normalized parts to ensure the core message content matches.
+// Goal: Ensure essential compatibility - correct error wrapping (for Unwrap/Is/As)
+//
+//	and preservation of the message content surrounding the wrapped error.
+//
+// Formatting Difference: This library consistently formats wrapped errors in its
+//
+//	Error() method as "MESSAGE: CAUSE_ERROR" (or just "CAUSE_ERROR" if MESSAGE is empty).
+//	The standard fmt.Errorf has more complex and variable spacing rules depending on
+//	characters around %w (e.g., sometimes omitting the colon, adding spaces differently).
+//
+// Semantic Comparison: Attempting to replicate fmt.Errorf's exact spacing makes the
+//
+//	library code brittle and overly complex. Therefore, this test focuses on *semantic*
+//	equivalence rather than exact string matching.
+//
+// Helper Logic: compareWrappedErrorStrings verifies compatibility by:
+//
+//	a) Checking that errors.Unwrap returns the same underlying cause instance.
+//	b) Extracting the textual prefix from this library's error string (before ": CAUSE").
+//	c) Extracting the textual remainder from fmt.Errorf's string by removing the cause string.
+//	d) Normalizing both extracted parts (trimming space, collapsing internal whitespace).
+//	e) Comparing the normalized parts to ensure the core message content matches.
 //
 // This approach ensures functional compatibility without being overly sensitive to minor
 // formatting variations between the libraries.
@@ -1151,7 +1157,7 @@ func TestNewfCompatibilityWithFmtErrorf(t *testing.T) {
 			}
 			// Consider defer customErrImpl.Free() if needed
 
-			// --- Verify Cause ---
+			// Verify Cause
 			stdUnwrapped := errors.Unwrap(stdErr)
 			customUnwrapped := errors.Unwrap(customErrImpl)
 
@@ -1172,7 +1178,7 @@ func TestNewfCompatibilityWithFmtErrorf(t *testing.T) {
 				}
 			}
 
-			// --- Verify String Output (Exact Match) ---
+			// Verify String Output (Exact Match)
 			gotStr := customErrImpl.Error()
 			wantStr := stdErr.Error()
 			if gotStr != wantStr {
