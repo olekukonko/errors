@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"runtime"
 	"strings"
@@ -730,7 +731,8 @@ func (e *Error) Error() string {
 //	  fmt.Println(frame) // e.g., "main.go:42"
 //	}
 func (e *Error) FastStack() []string {
-	if e.stack == nil {
+	// Same len-vs-nil reasoning as Stack().
+	if len(e.stack) == 0 {
 		return nil
 	}
 	configMu.RLock()
@@ -1152,7 +1154,10 @@ func (e *Error) Reset() {
 //	  fmt.Println(frame) // e.g., "main.main main.go:42"
 //	}
 func (e *Error) Stack() []string {
-	if e.stack == nil {
+	// Use len check not nil: a recycled error has stack reset to stack[:0]
+	// (non-nil, zero length). Calling CallersFrames on an empty slice returns
+	// no frames, making Stack() silently return [] instead of nil.
+	if len(e.stack) == 0 {
 		return nil
 	}
 
@@ -1495,4 +1500,44 @@ func WarmStackPool(count int) {
 	for i := 0; i < count; i++ {
 		stackPool.Put(make([]uintptr, 0, currentConfig.stackDepth))
 	}
+}
+
+// slog integration
+
+// LogValue implements slog.LogValuer so *Error can be passed directly to
+// any slog logging call and will be rendered as a structured group containing
+// message, name, code, category, and context fields.
+//
+// Example:
+//
+//	slog.Error("request failed", "err", err)
+//	// => err.message="...", err.name="AuthError", err.code=401, ...
+func (e *Error) LogValue() slog.Value {
+	if e == nil {
+		return slog.StringValue("<nil>")
+	}
+	attrs := make([]slog.Attr, 0, 6)
+	if e.msg != "" {
+		attrs = append(attrs, slog.String("message", e.msg))
+	}
+	if e.name != "" {
+		attrs = append(attrs, slog.String("name", e.name))
+	}
+	if e.code != 0 {
+		attrs = append(attrs, slog.Int("code", int(e.code)))
+	}
+	if e.category != "" {
+		attrs = append(attrs, slog.String("category", e.category))
+	}
+	if ctx := e.contextAtThisLevel(); len(ctx) > 0 {
+		ctxAttrs := make([]slog.Attr, 0, len(ctx))
+		for k, v := range ctx {
+			ctxAttrs = append(ctxAttrs, slog.Any(k, v))
+		}
+		attrs = append(attrs, slog.Attr{Key: "context", Value: slog.GroupValue(ctxAttrs...)})
+	}
+	if e.cause != nil {
+		attrs = append(attrs, slog.String("cause", e.cause.Error()))
+	}
+	return slog.GroupValue(attrs...)
 }
