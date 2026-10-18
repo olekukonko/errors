@@ -161,7 +161,7 @@ func (r *Retry) ExecuteContext(ctx context.Context, fn func() error) error {
 	execCtx := r.ctx
 	if execCtx == context.Background() && ctx != nil { // Use provided ctx if retry ctx is default and provided one isn't nil
 		execCtx = ctx
-	} else if ctx == nil { // Ensure we always have a non-nil context
+	} else if execCtx == nil { // Ensure we always have a non-nil context
 		execCtx = context.Background()
 	}
 	// Note: This logic might need refinement depending on how contexts should interact.
