@@ -87,6 +87,10 @@ func NewRetry(options ...RetryOption) *Retry {
 // addJitter adds ±25% jitter to avoid thundering herd problems.
 // Returns a duration adjusted by a random value between -25% and +25% of the input; not thread-safe.
 func addJitter(d time.Duration) time.Duration {
+	// Durations below two nanoseconds have no positive random range.
+	if d < 2*time.Nanosecond {
+		return d
+	}
 	jitter := time.Duration(rand.Int63n(int64(d/2))) - (d / 4)
 	return d + jitter
 }

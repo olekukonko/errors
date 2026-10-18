@@ -2,6 +2,7 @@ package errors
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"testing"
 	"time"
@@ -142,5 +143,44 @@ func TestExecuteReply_DifferentTypes(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("Expected 2 calls, got %d", calls)
+	}
+}
+
+func TestRetryJitterWithTinyDelays(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		delay time.Duration
+		cap   time.Duration
+	}{
+		{name: "zero", delay: 0},
+		{name: "one nanosecond", delay: time.Nanosecond},
+		{name: "negative delay clamped to zero", delay: -time.Second},
+		{name: "capped at one nanosecond", delay: time.Second, cap: time.Nanosecond},
+	} {
+		for _, withContext := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/context=%t", test.name, withContext), func(t *testing.T) {
+				attempts := 0
+				r := NewRetry(WithDelay(test.delay), WithMaxDelay(test.cap), WithMaxAttempts(2), WithRetryIf(func(error) bool { return true }))
+				fn := func() error {
+					attempts++
+					if attempts == 1 {
+						return fmt.Errorf("temporary failure")
+					}
+					return nil
+				}
+				var err error
+				if withContext {
+					err = r.ExecuteContext(context.Background(), fn)
+				} else {
+					err = r.Execute(fn)
+				}
+				if err != nil {
+					t.Fatalf("retry returned %v", err)
+				}
+				if attempts != 2 {
+					t.Fatalf("got %d attempts, want 2", attempts)
+				}
+			})
+		}
 	}
 }
